@@ -1,0 +1,154 @@
+:root {
+  color-scheme: dark;
+}
+
+body {
+  width: 320px;
+  margin: 0;
+  padding: 14px;
+  background: #1b2838;
+  color: #c7d5e0;
+  font: 13px/1.4 "Motiva Sans", Arial, sans-serif;
+}
+
+h1 {
+  margin: 0;
+  font-size: 15px;
+  color: #66c0f4;
+}
+
+h2 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8f98a0;
+}
+
+header p {
+  margin: 4px 0 12px;
+  font-size: 11px;
+  color: #8f98a0;
+}
+
+button {
+  width: 100%;
+  border: 0;
+  border-radius: 3px;
+  padding: 9px 10px;
+  background: #1a9fff;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #47b5ff;
+}
+
+button.ghost {
+  background: #2a475e;
+  color: #c7d5e0;
+  font-weight: 500;
+  padding: 6px 10px;
+}
+
+button.ghost:hover {
+  background: #3d6c8d;
+}
+
+.field {
+  display: block;
+  margin-top: 12px;
+  font-size: 12px;
+  color: #8f98a0;
+}
+
+.field span {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.field select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid #2a475e;
+  border-radius: 3px;
+  background: #16202d;
+  color: #c7d5e0;
+}
+
+.field input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid #2a475e;
+  border-radius: 3px;
+  background: #16202d;
+  color: #c7d5e0;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 12px;
+  color: #c7d5e0;
+  cursor: pointer;
+}
+
+.check input {
+  margin: 2px 0 0;
+  accent-color: #1a9fff;
+}
+
+.net {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #2a475e;
+}
+
+.fine {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #8f98a0;
+}
+
+.log {
+  margin: 8px 0;
+  padding: 6px 8px;
+  max-height: 140px;
+  overflow: auto;
+  list-style: none;
+  background: #16202d;
+  border: 1px solid #2a475e;
+  border-radius: 3px;
+  font: 10px/1.5 Consolas, "Courier New", monospace;
+  color: #8f98a0;
+}
+
+.log:empty::before {
+  content: "пока тихо";
+  color: #5c6874;
+}
+
+.log li {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.log li[data-kind="rate_limited"] {
+  color: #e35a4f;
+}
+
+.log li[data-kind="empty"] {
+  color: #e4b85c;
+}
+
+.blocked {
+  color: #e35a4f;
+  font-weight: 600;
+}

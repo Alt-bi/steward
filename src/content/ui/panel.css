@@ -1,0 +1,449 @@
+#stw-root {
+  position: fixed;
+  top: 88px;
+  right: 16px;
+  z-index: 2147483000;
+  width: 440px;
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 110px);
+  display: flex;
+  flex-direction: column;
+  background: #1b2838;
+  color: #c7d5e0;
+  border: 1px solid #2a475e;
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  font: 13px/1.35 "Motiva Sans", Arial, sans-serif;
+  overflow: hidden;
+}
+
+#stw-root.stw-collapsed {
+  max-height: none;
+}
+
+#stw-root.stw-collapsed .stw-tabs,
+#stw-root.stw-collapsed .stw-stack {
+  display: none;
+}
+
+.stw-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #16202d;
+  cursor: move;
+  user-select: none;
+}
+
+.stw-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.stw-title {
+  font-weight: 700;
+  color: #66c0f4;
+  letter-spacing: 0.02em;
+}
+
+.stw-sub {
+  font-size: 11px;
+  color: #8f98a0;
+}
+
+.stw-iconbtn {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 4px;
+  background: #2a475e;
+  color: #c7d5e0;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.stw-iconbtn:hover {
+  background: #3d6c8d;
+}
+
+.stw-tabs {
+  display: flex;
+  gap: 1px;
+  background: #2a475e;
+}
+
+.stw-tabs[hidden] {
+  display: none;
+}
+
+.stw-tab {
+  flex: 1;
+  border: 0;
+  padding: 7px 8px;
+  background: #16202d;
+  color: #8f98a0;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.stw-tab-on {
+  background: #1b2838;
+  color: #66c0f4;
+  font-weight: 600;
+}
+
+.stw-stack {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.stw-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.stw-section[hidden] {
+  display: none;
+}
+
+.stw-status {
+  padding: 8px 12px 6px;
+  font-size: 12px;
+  color: #8f98a0;
+}
+
+.stw-status[data-kind="err"] {
+  color: #e35a4f;
+}
+
+.stw-status[data-kind="ok"] {
+  color: #a4d007;
+}
+
+.stw-status[data-kind="warn"] {
+  color: #e4b85c;
+}
+
+.stw-status[data-kind="work"] {
+  color: #66c0f4;
+}
+
+.stw-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* --- reprice feature --- */
+
+.stw-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: #2a475e;
+}
+
+.stw-stat {
+  background: #1b2838;
+  padding: 8px 6px;
+  text-align: center;
+}
+
+.stw-stat-n {
+  font-size: 18px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.stw-stat[data-tone="warn"] .stw-stat-n {
+  color: #e4b85c;
+}
+
+.stw-stat-l {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #8f98a0;
+}
+
+.stw-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.stw-btn {
+  flex: 1;
+  border: 0;
+  border-radius: 3px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-weight: 600;
+  background: #2a475e;
+  color: #c7d5e0;
+}
+
+.stw-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.stw-btn-primary {
+  background: #1a9fff;
+  color: #fff;
+}
+
+.stw-btn-primary:hover:not(:disabled) {
+  background: #47b5ff;
+}
+
+.stw-btn-go {
+  background: #6a9e0c;
+  color: #fff;
+}
+
+.stw-btn-go:hover:not(:disabled) {
+  background: #86b43b;
+}
+
+.stw-rows {
+  overflow: auto;
+  padding: 0 8px 8px;
+  min-height: 80px;
+}
+
+.stw-empty {
+  padding: 16px 8px;
+  text-align: center;
+  color: #8f98a0;
+}
+
+.stw-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 2px 10px;
+  padding: 8px;
+  margin-bottom: 6px;
+  background: #16202d;
+  border-left: 3px solid #2a475e;
+  border-radius: 3px;
+}
+
+.stw-row[data-kind="reprice"] {
+  border-left-color: #e4b85c;
+}
+
+.stw-row[data-kind="ok"] {
+  border-left-color: #a4d007;
+}
+
+.stw-row[data-kind="fail"] {
+  border-left-color: #e35a4f;
+}
+
+.stw-name {
+  grid-column: 1;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stw-prices {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.stw-arrow {
+  margin: 0 6px;
+  color: #8f98a0;
+}
+
+.stw-tgt {
+  color: #a4d007;
+  font-weight: 700;
+}
+
+.stw-tgt.stw-muted {
+  color: #8f98a0;
+  font-weight: 400;
+}
+
+.stw-why {
+  grid-column: 1;
+  font-size: 11px;
+  color: #8f98a0;
+}
+
+.stw-resume {
+  padding-top: 0;
+}
+
+.stw-resume[hidden] {
+  display: none;
+}
+
+.stw-controls {
+  display: flex;
+  gap: 6px;
+  padding: 10px 12px 0;
+}
+
+.stw-select,
+.stw-num {
+  border: 1px solid #2a475e;
+  border-radius: 3px;
+  background: #16202d;
+  color: #c7d5e0;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.stw-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.stw-num {
+  width: 62px;
+}
+
+.stw-num:disabled {
+  opacity: 0.45;
+}
+
+.stw-check {
+  accent-color: #1a9fff;
+  vertical-align: middle;
+  margin-right: 2px;
+}
+
+.stw-row-pick .stw-name {
+  white-space: normal;
+}
+
+.stw-verdict {
+  margin: 0 12px 8px;
+  padding: 8px 10px;
+  border-radius: 3px;
+  font-weight: 700;
+  text-align: center;
+  background: #2a475e;
+  color: #c7d5e0;
+}
+
+.stw-verdict[hidden] {
+  display: none;
+}
+
+.stw-verdict[data-level="danger"] {
+  background: #4a1f1c;
+  color: #ff8b80;
+}
+
+.stw-verdict[data-level="warn"] {
+  background: #4a3a1c;
+  color: #e4b85c;
+}
+
+.stw-verdict[data-level="ok"] {
+  background: #2b3d16;
+  color: #a4d007;
+}
+
+.stw-row[data-kind="danger"] {
+  border-left-color: #e35a4f;
+}
+
+.stw-row[data-kind="warn"] {
+  border-left-color: #e4b85c;
+}
+
+.stw-row[data-kind="info"] {
+  border-left-color: #66c0f4;
+}
+
+.stw-row-warn {
+  grid-template-columns: 1fr;
+}
+
+.stw-row-warn .stw-name {
+  white-space: normal;
+  color: #c7d5e0;
+}
+
+/* --- price labels on Steam inventory tiles --- */
+
+.stw-badge {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  bottom: 2px;
+  z-index: 5;
+  padding: 1px 2px;
+  border-radius: 2px;
+  background: rgba(11, 17, 24, 0.86);
+  color: #a4d007;
+  font: 700 10px/1.2 "Motiva Sans", Arial, sans-serif;
+  text-align: center;
+  text-shadow: 0 1px 0 #000;
+  pointer-events: none;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.stw-badge[data-stw-known="0"] {
+  color: #8f98a0;
+}
+
+/* --- price history chart --- */
+
+.stw-chart {
+  padding: 4px 12px 0;
+}
+
+.stw-chart[hidden] {
+  display: none;
+}
+
+.stw-chart svg {
+  display: block;
+  background: #16202d;
+  border: 1px solid #2a475e;
+  border-radius: 3px;
+}
+
+.stw-chart-line {
+  stroke: #66c0f4;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.stw-chart-area {
+  fill: rgba(102, 192, 244, 0.16);
+  stroke: none;
+}
+
+.stw-chart-scale {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 1px 0;
+  font-size: 10px;
+  color: #8f98a0;
+  font-variant-numeric: tabular-nums;
+}
+
+.stw-chart-span {
+  color: #5c6874;
+}

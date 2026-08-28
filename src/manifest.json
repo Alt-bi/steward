@@ -1,0 +1,71 @@
+{
+  "manifest_version": 3,
+  "name": "Steward",
+  "short_name": "Steward",
+  "version": "0.0.0",
+  "description": "Helper for Steam Community Market, inventory, and trades. No ads, no subscriptions, no telemetry.",
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "action": {
+    "default_title": "Steward",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://steamcommunity.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://steamcommunity.com/market/*",
+        "https://steamcommunity.com/id/*/inventory*",
+        "https://steamcommunity.com/profiles/*/inventory*"
+      ],
+      "js": [
+        "page-bridge.js"
+      ],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://steamcommunity.com/tradeoffer/*"
+      ],
+      "js": [
+        "page-bridge.js",
+        "trade-bridge.js"
+      ],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://steamcommunity.com/market/*",
+        "https://steamcommunity.com/id/*/inventory*",
+        "https://steamcommunity.com/profiles/*/inventory*",
+        "https://steamcommunity.com/tradeoffer/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    }
+  ]
+}

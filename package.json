@@ -1,0 +1,21 @@
+{
+  "name": "steward",
+  "version": "2.5.1",
+  "private": true,
+  "description": "Open-source Steam Community Market helper. No ads, no subscriptions, no telemetry.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test/tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "test": "node run-tests.mjs",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.300",
+    "@types/node": "^26.4.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  }
+}

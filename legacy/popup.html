@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>Steam Reprice</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Steam Reprice</h1>
+      <p>Оверпрайс → на 1 копейку ниже чужого минимума. Без SIH.</p>
+    </header>
+
+    <button id="open-market" type="button">Открыть маркет Steam</button>
+    <p id="hint" class="hint">Панель живёт на странице маркета, не в этом окне.</p>
+
+    <label class="field">
+      Пауза при перестановке, мс
+      <input id="delay" type="number" min="800" max="8000" step="100" />
+    </label>
+
+    <p class="fine">
+      Скан идёт пачками через лёгкий priceoverview (не 1.6 с на лот).
+      Эта пауза только для снятия/выставления. Свои минимумы не режем.
+      После перестановки подтверди продажи в Steam Guard.
+    </p>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

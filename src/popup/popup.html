@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>Steward</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Steward</h1>
+      <p>Панель живёт на странице Steam, не в этом окне.</p>
+    </header>
+
+    <button id="open-market" type="button">Открыть маркет Steam</button>
+
+    <label class="field">
+      <span>Пауза при перестановке, мс</span>
+      <input id="delay" type="number" min="900" max="8000" step="100" />
+    </label>
+
+    <label class="field">
+      <span>На сколько ниже конкурента, коп.</span>
+      <input id="undercut" type="number" min="1" max="500" step="1" />
+    </label>
+
+    <label class="field">
+      <span>Откуда брать цены</span>
+      <select id="price-source">
+        <option value="search">Поиск маркета — пачками, мягкий лимит</option>
+        <option value="priceoverview">priceoverview — по одному, жёсткий лимит</option>
+      </select>
+    </label>
+
+    <label class="field">
+      <span>Цена считается свежей, мин</span>
+      <input id="price-ttl" type="number" min="1" max="1440" step="5" />
+    </label>
+
+    <label class="field">
+      <span>Параллельных запросов цен</span>
+      <input id="concurrency" type="number" min="1" max="8" step="1" />
+    </label>
+
+    <label class="check">
+      <input id="one-per-item" type="checkbox" />
+      <span>Только один лот на предмет за проход</span>
+    </label>
+
+    <label class="check">
+      <input id="exact-low" type="checkbox" />
+      <span>Точный минимум конкурента (лишний запрос, зато без слепых зон)</span>
+    </label>
+
+    <label class="field">
+      <span>Лимит быстрой покупки, коп.</span>
+      <input id="quick-buy" type="number" min="0" max="10000000" step="1000" />
+    </label>
+    <p class="fine">
+      Потолок для кнопки «Купить дешёвый» на странице предмета. Ставь столько, сколько не
+      страшно потерять из-за ошибки в разборе цены. Ноль выключает покупку совсем.
+    </p>
+
+    <section class="net">
+      <h2>Лимиты Steam</h2>
+      <p id="net-line" class="fine">—</p>
+      <ol id="net-log" class="log"></ol>
+      <button id="net-reset" type="button" class="ghost">Сбросить счётчики и кэш</button>
+    </section>
+
+    <p class="fine">
+      Steward, не SIH. Без рекламы, подписок и телеметрии — ничего никуда не
+      отправляется, все запросы идут только на steamcommunity.com.
+    </p>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

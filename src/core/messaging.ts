@@ -14,6 +14,7 @@ export type NetKind =
   | "history"
   | "mylistings"
   | "inventory"
+  | "description"
   | "write";
 
 export type NetOutcome = "ok" | "rate_limited" | "empty" | "error";
@@ -37,6 +38,8 @@ export interface NetStats {
   blocked: boolean;
   cooldownMsLeft: number;
   budget: Record<NetKind, KindBudget>;
+  /** Shared IP allowance sitting on top of the per-endpoint buckets. */
+  global: KindBudget;
 }
 
 export interface LogRow {
@@ -49,6 +52,13 @@ export interface CacheEntry {
   key: string;
   cents: number;
   ttlMs?: number;
+}
+
+/** A learned internal name for the listing book: item hash → Steam group id. */
+export interface GroupEntry {
+  hash: string;
+  appid: number;
+  groupId: string;
 }
 
 export interface Protocol {
@@ -67,6 +77,10 @@ export interface Protocol {
   "cache/get": { req: { keys: string[] }; res: { hits: Record<string, number | null> } };
   "cache/set": { req: { entries: CacheEntry[] }; res: { ok: true } };
   "cache/clear": { req: Record<string, never>; res: { ok: true } };
+  /** Learned internal names for the listing book, kept without TTL. */
+  "naming/get": { req: { keys: string[] }; res: { hits: Record<string, string | null> } };
+  "naming/set": { req: { entries: GroupEntry[] }; res: { ok: true } };
+  "naming/drop": { req: { keys: string[] }; res: { ok: true } };
   "log/note": { req: { kind: string; detail: string }; res: { ok: true } };
   "log/read": { req: { limit?: number }; res: { rows: LogRow[] } };
 }

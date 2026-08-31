@@ -2,6 +2,7 @@ import "./popup.css";
 
 import { send } from "../core/messaging";
 import { clampSettings, loadSettings, saveSettings, type Settings } from "../core/settings";
+import { clearHistories } from "../steam/histories";
 
 function byId<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id);
@@ -88,8 +89,10 @@ async function refreshNet(): Promise<void> {
       `ок ${stats.ok} · 429×${stats.hits429} · пустых ${stats.hitsEmpty}${cooldown}`
     );
     const budget = document.createElement("div");
+    const ip = stats.global;
     budget.textContent =
-      `бюджет: поиск ${stats.budget.search.tokens}/${stats.budget.search.capacity} ` +
+      `IP ${ip.tokens}/${ip.capacity} (${ip.ratePerMin}/мин) · ` +
+      `поиск ${stats.budget.search.tokens}/${stats.budget.search.capacity} ` +
       `(${stats.budget.search.ratePerMin}/мин) · ` +
       `цены ${stats.budget.price.tokens}/${stats.budget.price.capacity} ` +
       `(${stats.budget.price.ratePerMin}/мин)`;
@@ -123,6 +126,8 @@ netReset.addEventListener("click", () => {
   void (async () => {
     await send("net/reset", {});
     await send("cache/clear", {});
+    /** Sale histories live in their own store, and «сбросить кэш» must mean all of it. */
+    await clearHistories();
     await refreshNet();
   })();
 });

@@ -5,9 +5,18 @@ import {
   appidFromHash,
   contextsFromPage,
   groupInventory,
+  groupTilesByContext,
+  inventoryPageUrl,
+  INVENTORY_PAGE_SIZE,
   inventoryValue,
+  itemFromPageAsset,
+  itemsFromTiles,
+  itemsFromVisible,
+  marketableGroups,
   mergeInventory,
+  mergeItemsByAsset,
   ownerFromUrl,
+  pickVisibleItems,
   targetFromHash,
   type InventoryItem,
 } from "../src/steam/inventory";
@@ -132,6 +141,44 @@ describe("groupInventory", () => {
   it("keeps the same name in different games apart", () => {
     const groups = groupInventory([item("1", "Key", 1, 730), item("2", "Key", 1, 440)]);
     assert.equal(groups.size, 2);
+  });
+});
+
+describe("marketableGroups", () => {
+  it("skips groups where nothing can be listed", () => {
+    const locked: InventoryItem = {
+      appid: 730,
+      contextid: "2",
+      assetid: "1",
+      amount: 1,
+      name: "Trade-locked",
+      hash: "Trade-locked",
+      type: "",
+      iconUrl: "",
+      marketable: false,
+      tradable: false,
+    };
+    const caseItem: InventoryItem = {
+      ...locked,
+      assetid: "2",
+      name: "Chroma Case",
+      hash: "Chroma Case",
+      marketable: true,
+      tradable: true,
+    };
+    const { toPrice, skipped } = marketableGroups(groupInventory([locked, caseItem]));
+    assert.equal(skipped, 1);
+    assert.equal(toPrice.length, 1);
+    assert.equal(toPrice[0]!.hash, "Chroma Case");
+  });
+});
+
+describe("inventoryPageUrl", () => {
+  it("asks for 2000 items, the Steam web cap ASF documented", () => {
+    const url = inventoryPageUrl({ steamid: "7656", appid: 730, contextid: "2" }, null);
+    assert.ok(url.includes(`count=${INVENTORY_PAGE_SIZE}`));
+    assert.equal(INVENTORY_PAGE_SIZE, 2000);
+    assert.equal(url.includes("start_assetid"), false);
   });
 });
 
@@ -287,5 +334,141 @@ describe("appidFromHash", () => {
     assert.equal(appidFromHash("#"), null);
     assert.equal(appidFromHash("#tab"), null);
     assert.equal(appidFromHash(undefined as unknown as string), null);
+  });
+});
+
+describe("itemFromPageAsset", () => {
+  it("takes the hash from g_rgAssets and treats unknown marketable as sellable", () => {
+    const item = itemFromPageAsset(
+      { appid: 730, contextid: "2", assetid: "9" },
+      { market_hash_name: "Chroma Case", market_name: "Chroma Case", amount: "2" }
+    );
+    assert.equal(item?.hash, "Chroma Case");
+    assert.equal(item?.amount, 2);
+    assert.equal(item?.marketable, true);
+  });
+
+  it("refuses a tile with no name — it cannot be priced", () => {
+    assert.equal(itemFromPageAsset({ appid: 730, contextid: "2", assetid: "9" }, {}), null);
+    assert.equal(itemFromPageAsset({ appid: 730, contextid: "2", assetid: "9" }, null), null);
+  });
+
+  it("honours marketable: 0 so unmarketable copies are not priced", () => {
+    const item = itemFromPageAsset(
+      { appid: 730, contextid: "2", assetid: "9" },
+      { market_hash_name: "Trophy", marketable: 0 }
+    );
+    assert.equal(item?.marketable, false);
+  });
+});
+
+describe("itemsFromTiles / pickVisibleItems", () => {
+  const assets = {
+    "730": {
+      "2": {
+        "1": { market_hash_name: "Chroma Case", marketable: 1 },
+        "2": { market_hash_name: "Knife", marketable: 1 },
+      },
+    },
+  };
+
+  it("looks up only the tiles we asked for", () => {
+    const items = itemsFromTiles(
+      [
+        { appid: 730, contextid: "2", assetid: "1" },
+        { appid: 730, contextid: "2", assetid: "9" },
+      ],
+      assets
+    );
+    assert.equal(items.length, 1);
+    assert.equal(items[0]!.assetid, "1");
+  });
+
+  it("keeps a full inventory down to the visible set", () => {
+    const all: InventoryItem[] = [
+      {
+        appid: 730,
+        contextid: "2",
+        assetid: "1",
+        amount: 1,
+        name: "Case",
+        hash: "Case",
+        type: "",
+        iconUrl: "",
+        marketable: true,
+        tradable: true,
+      },
+      {
+        appid: 730,
+        contextid: "2",
+        assetid: "2",
+        amount: 1,
+        name: "Knife",
+        hash: "Knife",
+        type: "",
+        iconUrl: "",
+        marketable: true,
+        tradable: true,
+      },
+    ];
+    const visible = pickVisibleItems(all, [{ appid: 730, contextid: "2", assetid: "2" }]);
+    assert.equal(visible.length, 1);
+    assert.equal(visible[0]!.assetid, "2");
+  });
+
+  it("returns nothing when Steam has not painted any tiles", () => {
+    assert.deepEqual(pickVisibleItems([itemLike("1")], []), []);
+  });
+
+  it("merges page-world items with asset-index items without duplicating", () => {
+    const fromPage = itemsFromVisible([
+      { appid: 730, contextid: "2", assetid: "1", market_hash_name: "Chroma Case" },
+    ]);
+    const fromAssets = itemsFromTiles([{ appid: 730, contextid: "2", assetid: "1" }], assets);
+    const merged = mergeItemsByAsset(fromPage, fromAssets);
+    assert.equal(merged.length, 1);
+  });
+});
+
+function itemLike(assetid: string): InventoryItem {
+  return {
+    appid: 730,
+    contextid: "2",
+    assetid,
+    amount: 1,
+    name: assetid,
+    hash: assetid,
+    type: "",
+    iconUrl: "",
+    marketable: true,
+    tradable: true,
+  };
+}
+
+describe("groupTilesByContext", () => {
+  it("splits tiles by the inventory they live in", () => {
+    /** CS2 draws the backpack (2) and the storage units (16) on one page. */
+    const groups = groupTilesByContext([
+      { appid: 730, contextid: "2", assetid: "1" },
+      { appid: 730, contextid: "16", assetid: "2" },
+      { appid: 730, contextid: "2", assetid: "3" },
+    ]);
+    assert.equal(groups.length, 2);
+    assert.deepEqual(
+      groups.map((g) => [g.contextid, g.tiles.length]),
+      [["2", 2], ["16", 1]]
+    );
+  });
+
+  it("keeps games apart even when the context id repeats", () => {
+    const groups = groupTilesByContext([
+      { appid: 730, contextid: "2", assetid: "1" },
+      { appid: 440, contextid: "2", assetid: "2" },
+    ]);
+    assert.deepEqual(groups.map((g) => g.appid), [730, 440]);
+  });
+
+  it("returns nothing for no tiles", () => {
+    assert.deepEqual(groupTilesByContext([]), []);
   });
 });

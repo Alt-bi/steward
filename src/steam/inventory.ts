@@ -1,5 +1,9 @@
-import type { AppContextData, Cents } from "../core/types";
-import { fetchJsonRetry, sleep, SteamError, type Pacing } from "./net";
+import type { TileRef } from "../core/tiles";
+import type { AppContextData, Cents, ItemKeyed, PageVisibleItem, SteamAsset, SteamAssetIndex } from "../core/types";
+import { fetchJsonRetry, SteamError, type Pacing } from "./net";
+import { lookupAsset } from "./page-context";
+
+export type { TileRef };
 
 /**
  * The inventory endpoint the inventory page itself uses. It answers with two flat
@@ -136,6 +140,94 @@ export function groupInventory(items: InventoryItem[]): Map<string, InventoryGro
   return groups;
 }
 
+function toAmount(value: unknown): number {
+  const n = toInt(value, 1);
+  return n || 1;
+}
+
+/** Builds a pricable item from a page-world tile (`rgItem` or `g_rgAssets`). */
+export function itemFromPageAsset(
+  ref: TileRef,
+  asset: SteamAsset | PageVisibleItem | null | undefined
+): InventoryItem | null {
+  const hash = asset?.market_hash_name ?? asset?.market_name ?? asset?.name ?? "";
+  if (!hash) return null;
+  const marketable = asset?.marketable;
+  const tradable = asset?.tradable;
+  return {
+    appid: ref.appid,
+    contextid: ref.contextid,
+    assetid: ref.assetid,
+    amount: toAmount(asset?.amount),
+    name: asset?.market_name ?? asset?.name ?? hash,
+    hash,
+    type: "",
+    iconUrl: "",
+    marketable: marketable == null ? true : marketable === 1,
+    tradable: tradable == null ? true : tradable === 1,
+  };
+}
+
+export function itemsFromTiles(tiles: TileRef[], assets: SteamAssetIndex | null): InventoryItem[] {
+  const out: InventoryItem[] = [];
+  for (const tile of tiles) {
+    const item = itemFromPageAsset(tile, lookupAsset(assets, tile.appid, tile.contextid, tile.assetid));
+    if (item) out.push(item);
+  }
+  return out;
+}
+
+export function itemsFromVisible(visible: PageVisibleItem[]): InventoryItem[] {
+  const out: InventoryItem[] = [];
+  for (const row of visible) {
+    const item = itemFromPageAsset(
+      { appid: row.appid, contextid: row.contextid, assetid: row.assetid },
+      row
+    );
+    if (item) out.push(item);
+  }
+  return out;
+}
+
+export function pickVisibleItems(all: InventoryItem[], tiles: TileRef[]): InventoryItem[] {
+  if (!tiles.length) return [];
+  const ids = new Set(tiles.map((t) => `${t.appid}_${t.contextid}_${t.assetid}`));
+  return all.filter((item) => ids.has(`${item.appid}_${item.contextid}_${item.assetid}`));
+}
+
+export interface TileContext {
+  appid: number;
+  contextid: string;
+  tiles: TileRef[];
+}
+
+/**
+ * Tiles split by the inventory they belong to. One page can show more than one
+ * context — CS2 keeps 2 and 16 side by side — so reading only the first one leaves
+ * the rest of the grid without names.
+ */
+export function groupTilesByContext(tiles: TileRef[]): TileContext[] {
+  const byKey = new Map<string, TileContext>();
+  for (const tile of tiles) {
+    const key = `${tile.appid}_${tile.contextid}`;
+    const bucket = byKey.get(key);
+    if (bucket) bucket.tiles.push(tile);
+    else byKey.set(key, { appid: tile.appid, contextid: tile.contextid, tiles: [tile] });
+  }
+  return [...byKey.values()];
+}
+
+export function mergeItemsByAsset(...lists: InventoryItem[][]): InventoryItem[] {
+  const byId = new Map<string, InventoryItem>();
+  for (const list of lists) {
+    for (const item of list) {
+      const key = `${item.appid}_${item.contextid}_${item.assetid}`;
+      if (!byId.has(key)) byId.set(key, item);
+    }
+  }
+  return [...byId.values()];
+}
+
 /** Total of `count × price` over the groups we have a price for. */
 export function inventoryValue(
   groups: Map<string, InventoryGroup>,
@@ -248,8 +340,35 @@ export interface LoadInventoryResult {
   total: number;
 }
 
-const PAGE_SIZE = 500;
-const MAX_PAGES = 12;
+/** ASF's cap: Steam web forcibly limits a single inventory request to this. */
+export const INVENTORY_PAGE_SIZE = 2000;
+export const INVENTORY_MAX_PAGES = 15;
+
+export function inventoryPageUrl(target: InventoryTarget, startAssetId: string | null): string {
+  return (
+    `https://steamcommunity.com/inventory/${encodeURIComponent(target.steamid)}/` +
+    `${encodeURIComponent(target.appid)}/${encodeURIComponent(target.contextid)}` +
+    `?l=english&count=${INVENTORY_PAGE_SIZE}` +
+    (startAssetId ? `&start_assetid=${encodeURIComponent(startAssetId)}` : "")
+  );
+}
+
+/** Groups with at least one marketable copy — the only ones worth a price request. */
+export function marketableGroups(groups: Map<string, InventoryGroup>): {
+  toPrice: ItemKeyed[];
+  skipped: number;
+} {
+  const toPrice: ItemKeyed[] = [];
+  let skipped = 0;
+  for (const group of groups.values()) {
+    if (group.items.some((item) => item.marketable)) {
+      toPrice.push({ key: group.key, appid: group.appid, hash: group.hash, name: group.name });
+    } else {
+      skipped += 1;
+    }
+  }
+  return { toPrice, skipped };
+}
 
 export async function loadInventory(
   target: InventoryTarget,
@@ -265,11 +384,7 @@ export async function loadInventory(
   for (;;) {
     if (pacing.abort?.()) throw new SteamError("aborted");
 
-    const url: string =
-      `https://steamcommunity.com/inventory/${encodeURIComponent(target.steamid)}/` +
-      `${encodeURIComponent(target.appid)}/${encodeURIComponent(target.contextid)}` +
-      `?l=english&count=${PAGE_SIZE}` +
-      (startAssetId ? `&start_assetid=${encodeURIComponent(startAssetId)}` : "");
+    const url: string = inventoryPageUrl(target, startAssetId);
 
     const data: InventoryResponse = await fetchJsonRetry<InventoryResponse>(url, {
       kind: "inventory",
@@ -288,12 +403,11 @@ export async function loadInventory(
 
     if (!data.more_items || !data.last_assetid) break;
     /** Hitting the cap with more to come is the only honest "truncated". */
-    if (pages >= MAX_PAGES) {
+    if (pages >= INVENTORY_MAX_PAGES) {
       truncated = true;
       break;
     }
     startAssetId = data.last_assetid;
-    await sleep(200);
   }
 
   return { items, truncated, total: total || items.length };

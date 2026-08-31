@@ -3,7 +3,7 @@ import "./support/env";
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import { calls, grantThenBlock, jsonReply, resetEnv, seedCache, setAcquire, setSteam } from "./support/env";
+import { cacheSize, calls, grantThenBlock, jsonReply, namingFacts, resetEnv, seedCache, setAcquire, setSteam } from "./support/env";
 
 import type { ItemKeyed } from "../src/core/types";
 import { fetchMarketLows } from "../src/steam/prices";
@@ -59,7 +59,7 @@ describe("fetchMarketLows", () => {
   });
 
   it("returns what it has when Steam cuts us off, instead of throwing", async () => {
-    setSteam(() => jsonReply({ success: true, results: [] }));
+    setSteam(() => jsonReply({ success: true, lowest_price: "10,00 pуб." }));
     grantThenBlock(2);
 
     const items = Array.from({ length: 10 }, (_, i) => item(`Case ${i}`));
@@ -124,7 +124,7 @@ describe("fetchMarketLows", () => {
     assert.equal(res.requests, 3, "one search that missed, two overviews that hit");
   });
 
-  it("marks a genuinely unpriceable item as null and keeps going", async () => {
+  it("leaves a success:false item unresolved so it can be retried", async () => {
     let n = 0;
     setSteam(() => {
       n += 1;
@@ -140,28 +140,51 @@ describe("fetchMarketLows", () => {
     });
 
     assert.equal(res.stopped, null, "one bad item does not stop the run");
-    assert.equal(res.unresolved.length, 0);
+    assert.equal(res.unresolved.length, 1);
+    assert.equal(res.unresolved[0]!.hash, "Ghost Item");
     assert.equal(res.lows[items[0]!.key], null);
     assert.equal(res.lows[items[1]!.key], 1000);
+    assert.equal(cacheSize(), 1, "the empty answer must not be cached as a real price");
   });
 
   it("treats a 429 as a stop, not as a missing price", async () => {
     setSteam(() => ({ status: 429, body: "", headers: { "Retry-After": "1" } }));
-    /** Real scheduler, so the 429 is what decides; grant freely to keep it quick. */
-    setAcquire((kind) => (kind === "price" ? { ok: true } : { ok: true }));
+    setAcquire(() => ({ ok: true as const }));
 
-    const items = [item("Anything")];
+    const items = [item("Anything"), item("Next")];
     const res = await fetchMarketLows(items, {
       concurrency: 1,
       source: "priceoverview",
       fallbackToOverview: false,
     });
 
-    /**
-     * With the breaker bypassed the item ends up unpriced rather than stopping the
-     * run — the important part is that it is never recorded as a real price.
-     */
+    assert.equal(res.stopped, "blocked");
+    assert.equal(res.unresolved.length, 2, "neither item is written off as priceless");
     assert.equal(res.lows[items[0]!.key], null);
+  });
+
+  it("does not sit on a cooldown after a 429 while other workers are waiting", async () => {
+    setAcquire(null);
+    setSteam(() => ({ status: 429, body: "", headers: { "Retry-After": "30" } }));
+
+    const items = Array.from({ length: 20 }, (_, i) => item(`X ${i}`));
+    const started = Date.now();
+    const res = await fetchMarketLows(items, { concurrency: 4, source: "priceoverview" });
+    const elapsed = Date.now() - started;
+
+    assert.equal(res.stopped, "blocked");
+    assert.ok(elapsed < 4000, `must stop immediately, not wait out Retry-After, took ${elapsed}ms`);
+  });
+
+  it("does not burn a streak of success:false into resolved-null", async () => {
+    setSteam(() => jsonReply({ success: false }));
+    setAcquire(() => ({ ok: true as const }));
+
+    const items = Array.from({ length: 8 }, (_, i) => item(`Ghost ${i}`));
+    const res = await fetchMarketLows(items, { concurrency: 1, source: "priceoverview" });
+
+    assert.equal(res.unresolved.length, 8);
+    assert.equal(cacheSize(), 0);
   });
 });
 
@@ -240,5 +263,96 @@ describe("fetchMarketLows source selection", () => {
     assert.equal(res.searchSkipped, null);
     assert.equal(res.requests, 20, "twenty families, twenty requests, sixty prices");
     assert.equal(res.unresolved.length, 0);
+  });
+});
+
+describe("cacheOnly", () => {
+  beforeEach(async () => {
+    await resetEnv();
+    alwaysGrant();
+  });
+
+  it("answers from the cache and sends nothing", async () => {
+    setSteam(() => {
+      throw new Error("cacheOnly must not reach the network");
+    });
+    seedCache(key("Chroma Case"), 4200);
+
+    const items = [item("Chroma Case"), item("Glove Case")];
+    const res = await fetchMarketLows(items, {
+      concurrency: 2,
+      source: "priceoverview",
+      cacheOnly: true,
+    });
+
+    assert.equal(calls.length, 0);
+    assert.equal(res.requests, 0);
+    assert.equal(res.lows[items[0]!.key], 4200);
+    /** The miss is handed back whole, for whoever asks a better endpoint next. */
+    assert.equal(res.lows[items[1]!.key], null);
+    assert.deepEqual(res.unresolved.map((i) => i.hash), ["Glove Case"]);
+    assert.equal(res.stopped, null);
+  });
+});
+
+describe("search answers teach the group id", () => {
+  beforeEach(async () => {
+    await resetEnv();
+    alwaysGrant();
+  });
+
+  it("remembers the internal name a search row carries", async () => {
+    setSteam(() =>
+      jsonReply({
+        success: true,
+        results: [
+          {
+            hash_name: "AK-47 | Redline (Field-Tested)",
+            sell_price: 12000,
+            asset_description: {
+              market_hash_name: "AK-47 | Redline (Field-Tested)",
+              market_bucket_group_id: "G1807209A023004",
+            },
+          },
+          {
+            hash_name: "AK-47 | Redline (Minimal Wear)",
+            sell_price: 25000,
+            asset_description: {
+              market_hash_name: "AK-47 | Redline (Minimal Wear)",
+              market_bucket_group_id: "G1807209A023004",
+            },
+          },
+        ],
+      })
+    );
+
+    const items = [item("AK-47 | Redline (Field-Tested)"), item("AK-47 | Redline (Minimal Wear)")];
+    const res = await fetchMarketLows(items, {
+      concurrency: 4,
+      source: "search",
+      fallbackToOverview: false,
+    });
+    /** The learning rides behind the answer, so give the send a beat. */
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(res.lows[items[0]!.key], 12000, "the prices themselves are untouched");
+    assert.deepEqual(namingFacts(), {
+      "AK-47 | Redline (Field-Tested)": "G1807209A023004",
+      "AK-47 | Redline (Minimal Wear)": "G1807209A023004",
+    });
+  });
+
+  it("keeps its mouth shut when the answer carries no group ids", async () => {
+    setSteam(() =>
+      jsonReply({ success: true, results: [{ hash_name: "Chroma Case", sell_price: 300 }] })
+    );
+    await fetchMarketLows([item("Chroma Case")], {
+      concurrency: 2,
+      source: "search",
+      fallbackToOverview: false,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(namingFacts(), {}, "nothing learned, nothing stored");
   });
 });

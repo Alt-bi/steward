@@ -23,20 +23,27 @@ interface Budget {
 }
 
 /**
- * `priceoverview` is the tightest of these by a wide margin — it is a metered API,
- * not a page the market UI itself calls. `search` and `listings` are what browsing
- * the market hits normally, so they tolerate a browsing-like rate.
+ * Per-endpoint ceilings. They exist so a sell loop cannot steal the price budget,
+ * but they are not the real limiter: Steam meters the IP, not the path.
+ *
+ * Numbers sit below SIH's 20 priceoverview/min and well below a 18+40 combined
+ * burst — the user's Steam client and other tabs share the same IPv4 quota.
  */
 const LIMITS: Record<NetKind, Budget> = {
-  price: { ratePerMin: 18, capacity: 18, minRatePerMin: 4 },
-  search: { ratePerMin: 40, capacity: 10, minRatePerMin: 6 },
-  listings: { ratePerMin: 30, capacity: 8, minRatePerMin: 5 },
-  /** Heavier than a listing page and only ever asked for one item at a time. */
-  history: { ratePerMin: 15, capacity: 5, minRatePerMin: 3 },
-  mylistings: { ratePerMin: 12, capacity: 4, minRatePerMin: 3 },
-  inventory: { ratePerMin: 12, capacity: 4, minRatePerMin: 3 },
-  write: { ratePerMin: 20, capacity: 2, minRatePerMin: 4 },
+  price: { ratePerMin: 15, capacity: 4, minRatePerMin: 3 },
+  search: { ratePerMin: 20, capacity: 4, minRatePerMin: 4 },
+  listings: { ratePerMin: 10, capacity: 2, minRatePerMin: 3 },
+  history: { ratePerMin: 6, capacity: 1, minRatePerMin: 2 },
+  /** One call per scan, only when the page hid the asset references. */
+  mylistings: { ratePerMin: 6, capacity: 2, minRatePerMin: 2 },
+  inventory: { ratePerMin: 10, capacity: 2, minRatePerMin: 3 },
+  /** Item classes never change, so every one of these is paid for exactly once. */
+  description: { ratePerMin: 20, capacity: 5, minRatePerMin: 4 },
+  write: { ratePerMin: 8, capacity: 1, minRatePerMin: 2 },
 };
+
+/** Shared IP budget wrapping every kind. */
+const GLOBAL: Budget = { ratePerMin: 20, capacity: 6, minRatePerMin: 4 };
 
 interface KindState {
   tokens: number;
@@ -48,6 +55,7 @@ interface KindState {
 
 interface State {
   kinds: Record<NetKind, KindState>;
+  global: KindState;
   cooldownUntil: number;
   hits429: number;
   hitsEmpty: number;
@@ -59,28 +67,39 @@ interface State {
 
 const COOLDOWN_CAP = 90_000;
 
-/** Consecutive refusals that mean "stop asking for now". */
-const BLOCK_AFTER = 6;
+/** First 429 waits this long when Steam sent no Retry-After. SIH uses 30s. */
+const BASE_COOLDOWN_MS = 30_000;
+
+/**
+ * One 429 is enough. Waiting out a cooldown and then sending the remaining 700
+ * prices is how a 30-second microban becomes hours: Steam refreshes the IP block
+ * on every hit during it.
+ */
+const BLOCK_AFTER = 1;
 
 /** Successes before the rate creeps back up. */
 const RELAX_AFTER = 8;
 const RELAX_STEP = 2;
 
-const SESSION_KEY = "srpScheduler";
+const SESSION_KEY = "stwScheduler";
+const LEGACY_SESSION_KEY = "srpScheduler";
 const KINDS = Object.keys(LIMITS) as NetKind[];
+
+function kindState(budget: Budget): KindState {
+  return {
+    tokens: budget.capacity,
+    lastRefill: 0,
+    ratePerMin: budget.ratePerMin,
+    okStreak: 0,
+  };
+}
 
 function fresh(): State {
   const kinds = {} as Record<NetKind, KindState>;
-  for (const kind of KINDS) {
-    kinds[kind] = {
-      tokens: LIMITS[kind].capacity,
-      lastRefill: 0,
-      ratePerMin: LIMITS[kind].ratePerMin,
-      okStreak: 0,
-    };
-  }
+  for (const kind of KINDS) kinds[kind] = kindState(LIMITS[kind]);
   return {
     kinds,
+    global: kindState(GLOBAL),
     cooldownUntil: 0,
     hits429: 0,
     hitsEmpty: 0,
@@ -92,24 +111,36 @@ function fresh(): State {
 }
 
 let state: State = fresh();
-let hydrated = false;
+/**
+ * The one load this worker performs, kept as the promise rather than as a flag.
+ *
+ * A flag was set before the read finished, so every caller that arrived in the
+ * same tick — a content script wakes the worker with a burst, which is the normal
+ * case — sailed past it and spent a fresh, empty budget while the cooldown the
+ * previous worker had recorded was still being read off the disk. Six requests
+ * into a live ban, which is precisely how a thirty-second pause becomes hours.
+ */
+let hydrating: Promise<void> | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * A killed service worker must not forget an active cooldown or a spent budget,
  * or the next tab would walk straight back into the limit.
  */
-async function hydrate(): Promise<void> {
-  if (hydrated) return;
-  hydrated = true;
+function hydrate(): Promise<void> {
+  return (hydrating ??= load());
+}
+
+async function load(): Promise<void> {
   try {
-    const stored = await chrome.storage.session.get(SESSION_KEY);
-    const saved = stored[SESSION_KEY] as State | undefined;
+    const stored = await chrome.storage.session.get([SESSION_KEY, LEGACY_SESSION_KEY]);
+    const saved = (stored[SESSION_KEY] ?? stored[LEGACY_SESSION_KEY]) as State | undefined;
     if (!saved?.kinds) return;
     const base = fresh();
-    state = { ...base, ...saved, kinds: { ...base.kinds, ...saved.kinds } };
+    state = { ...base, ...saved, kinds: { ...base.kinds, ...saved.kinds }, global: saved.global ?? base.global };
     /** A kind added in a later version must not come back undefined. */
     for (const kind of KINDS) state.kinds[kind] ??= base.kinds[kind];
+    state.global ??= base.global;
   } catch {
     /* session storage is best-effort */
   }
@@ -123,9 +154,7 @@ function persist(): void {
   }, 250);
 }
 
-function refill(kind: NetKind, now: number): KindState {
-  const k = state.kinds[kind];
-  const limit = LIMITS[kind];
+function refillBucket(k: KindState, limit: Budget, now: number): KindState {
   if (!k.lastRefill) {
     k.lastRefill = now;
     return k;
@@ -136,6 +165,11 @@ function refill(kind: NetKind, now: number): KindState {
     k.lastRefill = now;
   }
   return k;
+}
+
+function waitForToken(k: KindState): number {
+  if (k.tokens >= 1) return 0;
+  return Math.ceil(((1 - k.tokens) * 60_000) / Math.max(1, k.ratePerMin));
 }
 
 export type Slot =
@@ -153,15 +187,17 @@ export async function acquire(kind: NetKind): Promise<Slot> {
     return { ok: false, waitMs: state.cooldownUntil - now, reason: "cooldown" };
   }
 
-  const k = refill(kind, now);
-  if (k.tokens >= 1) {
+  const k = refillBucket(state.kinds[kind], LIMITS[kind], now);
+  const g = refillBucket(state.global, GLOBAL, now);
+  if (k.tokens >= 1 && g.tokens >= 1) {
     k.tokens -= 1;
+    g.tokens -= 1;
     persist();
     return { ok: true };
   }
 
-  /** Time until one whole token exists again. */
-  const waitMs = Math.ceil(((1 - k.tokens) * 60_000) / Math.max(1, k.ratePerMin));
+  /** Time until both the kind and the IP budget have a token. */
+  const waitMs = Math.max(waitForToken(k), waitForToken(g));
   persist();
   return { ok: false, waitMs, reason: "budget" };
 }
@@ -182,10 +218,15 @@ export async function report(
       state.emptyStreak = 0;
       state.consecutive429 = 0;
       k.okStreak += 1;
+      state.global.okStreak += 1;
       if (k.okStreak >= RELAX_AFTER) {
         k.okStreak = 0;
         k.ratePerMin = Math.min(limit.ratePerMin, k.ratePerMin + RELAX_STEP);
         if (state.hits429 > 0) state.hits429 -= 1;
+      }
+      if (state.global.okStreak >= RELAX_AFTER) {
+        state.global.okStreak = 0;
+        state.global.ratePerMin = Math.min(GLOBAL.ratePerMin, state.global.ratePerMin + RELAX_STEP);
       }
       break;
     }
@@ -194,14 +235,18 @@ export async function report(
       state.hits429 += 1;
       state.consecutive429 += 1;
       k.okStreak = 0;
+      state.global.okStreak = 0;
       /** Multiplicative decrease on the rate, and the burst is spent. */
       k.ratePerMin = Math.max(limit.minRatePerMin, Math.floor(k.ratePerMin / 2));
       k.tokens = 0;
       k.lastRefill = now;
+      state.global.ratePerMin = Math.max(GLOBAL.minRatePerMin, Math.floor(state.global.ratePerMin / 2));
+      state.global.tokens = 0;
+      state.global.lastRefill = now;
       const backoff =
         retryAfterMs && retryAfterMs > 0
           ? retryAfterMs
-          : Math.min(COOLDOWN_CAP, 4000 + 2000 * Math.min(state.hits429, 8));
+          : Math.min(COOLDOWN_CAP, BASE_COOLDOWN_MS + 5_000 * Math.min(state.hits429 - 1, 8));
       state.cooldownUntil = Math.max(state.cooldownUntil, now + backoff);
       if (state.consecutive429 >= BLOCK_AFTER) state.blocked = true;
       break;
@@ -210,14 +255,24 @@ export async function report(
     /**
      * `success:false` with HTTP 200 is Steam's soft throttle. A streak means a real
      * limit; one-offs are normal, since delisted items answer exactly the same way.
+     *
+     * Except on `search`, where «found nothing» is the endpoint doing its job.
+     * Community items hash as `296830-:CoffeeBreak:` and simply are not findable by
+     * name, so a run of misses is routine — and counting it as a ban blocked whole
+     * scans that Steam had never refused. Search has its own guard for this: the
+     * price scanner drops search after a sample of groups misses (`prices.ts`).
      */
     case "empty":
       state.hitsEmpty += 1;
+      if (kind === "search") break;
       state.emptyStreak += 1;
       if (state.emptyStreak >= 4) {
         state.emptyStreak = 0;
         k.ratePerMin = Math.max(limit.minRatePerMin, Math.floor(k.ratePerMin * 0.75));
-        state.cooldownUntil = Math.max(state.cooldownUntil, now + 4000);
+        state.global.ratePerMin = Math.max(GLOBAL.minRatePerMin, Math.floor(state.global.ratePerMin * 0.75));
+        state.cooldownUntil = Math.max(state.cooldownUntil, now + BASE_COOLDOWN_MS);
+        /** Same as a 429: stop the scan. Four success:false in a row is a throttle. */
+        state.blocked = true;
       }
       break;
 
@@ -227,20 +282,17 @@ export async function report(
   persist();
 }
 
+function snapshot(k: KindState, limit: Budget, now: number): { tokens: number; ratePerMin: number; capacity: number } {
+  const elapsed = k.lastRefill ? Math.max(0, now - k.lastRefill) : 0;
+  const tokens = Math.min(limit.capacity, k.tokens + (elapsed / 60_000) * k.ratePerMin);
+  return { tokens: Math.floor(tokens), ratePerMin: k.ratePerMin, capacity: limit.capacity };
+}
+
 export async function stats(): Promise<NetStats> {
   await hydrate();
   const now = Date.now();
   const budget = {} as Record<NetKind, { tokens: number; ratePerMin: number; capacity: number }>;
-  for (const kind of KINDS) {
-    const k = state.kinds[kind];
-    const elapsed = k.lastRefill ? Math.max(0, now - k.lastRefill) : 0;
-    const tokens = Math.min(LIMITS[kind].capacity, k.tokens + (elapsed / 60_000) * k.ratePerMin);
-    budget[kind] = {
-      tokens: Math.floor(tokens),
-      ratePerMin: k.ratePerMin,
-      capacity: LIMITS[kind].capacity,
-    };
-  }
+  for (const kind of KINDS) budget[kind] = snapshot(state.kinds[kind], LIMITS[kind], now);
   return {
     ok: state.ok,
     hits429: state.hits429,
@@ -249,6 +301,7 @@ export async function stats(): Promise<NetStats> {
     blocked: state.blocked,
     cooldownMsLeft: Math.max(0, state.cooldownUntil - now),
     budget,
+    global: snapshot(state.global, GLOBAL, now),
   };
 }
 
@@ -266,6 +319,18 @@ export async function unblock(): Promise<void> {
 
 export async function reset(): Promise<void> {
   state = fresh();
-  hydrated = true;
+  hydrating = Promise.resolve();
   persist();
+}
+
+/**
+ * Drops the in-memory copy so the next call loads it from session storage again.
+ *
+ * This is what a killed service worker does, and it is the only way to reach the
+ * hydration path from a test — every other entry point marks the state loaded, so
+ * the code that runs on every single worker wake-up had never once been exercised.
+ */
+export function forget(): void {
+  hydrating = null;
+  state = fresh();
 }

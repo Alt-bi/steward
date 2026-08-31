@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { projectAppContexts, projectAssets, projectWallet } from "../src/page/project";
+import {
+  projectAppContexts,
+  projectAssets,
+  projectListingInfo,
+  projectRgItem,
+  projectWallet,
+} from "../src/page/project";
 
 /**
  * The bug these guard against: `postMessage` structure-clones its argument, and
@@ -123,6 +129,83 @@ describe("projectAssets", () => {
     assert.equal(projectAssets(null), null);
     const projected = projectAssets({ "730": { "2": "not an object" } });
     assert.deepEqual(projected?.["730"], {});
+  });
+
+  it("lifts the hash off a nested description, which is where Steam often leaves it", () => {
+    const projected = projectAssets({
+      "730": {
+        "2": {
+          "1": {
+            amount: "1",
+            description: {
+              market_hash_name: "AK-47 | Redline (Field-Tested)",
+              marketable: 1,
+            },
+            element: () => undefined,
+          },
+        },
+      },
+    });
+    const asset = projected?.["730"]?.["2"]?.["1"];
+    assert.equal(asset?.market_hash_name, "AK-47 | Redline (Field-Tested)");
+    assert.equal(asset?.marketable, 1);
+    assert.equal("description" in (asset ?? {}), false);
+    assertCloneable(projected, "asset with nested description");
+  });
+});
+
+describe("projectRgItem", () => {
+  it("copies named fields and drops the circular element pointer", () => {
+    const raw: Record<string, unknown> = {
+      appid: 730,
+      contextid: "2",
+      assetid: "99",
+      market_hash_name: "Chroma Case",
+      marketable: 1,
+    };
+    raw.element = raw;
+    const projected = projectRgItem(raw);
+    assert.equal(projected?.assetid, "99");
+    assert.equal(projected?.market_hash_name, "Chroma Case");
+    assert.equal("element" in (projected ?? {}), false);
+    assertCloneable(projected, "rgItem projection");
+  });
+
+  it("fills appid/context/asset from the tile id when rgItem is thin", () => {
+    const projected = projectRgItem(
+      { description: { market_hash_name: "Knife", marketable: 1 } },
+      "730_2_55"
+    );
+    assert.equal(projected?.appid, 730);
+    assert.equal(projected?.contextid, "2");
+    assert.equal(projected?.assetid, "55");
+    assert.equal(projected?.market_hash_name, "Knife");
+  });
+
+  it("returns null when there is no hash to price with", () => {
+    assert.equal(projectRgItem({ appid: 730, id: "1" }, "730_2_1"), null);
+    assert.equal(projectRgItem(null, "730_2_1"), null);
+  });
+});
+
+describe("projectListingInfo", () => {
+  it("keeps the fields the cheapest-lot parser reads and drops the rest", () => {
+    const projected = projectListingInfo({
+      "99": {
+        listingid: "99",
+        converted_price: 500,
+        converted_fee: 75,
+        steamid_lister: "should not survive",
+        element: () => undefined,
+      },
+    });
+    assert.equal(projected?.["99"]?.converted_price, 500);
+    assert.equal("steamid_lister" in (projected?.["99"] ?? {}), false);
+    assertCloneable(projected, "listing info projection");
+  });
+
+  it("returns null when the page has no listing table", () => {
+    assert.equal(projectListingInfo(null), null);
   });
 });
 

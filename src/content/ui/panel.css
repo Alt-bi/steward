@@ -211,6 +211,16 @@
   background: #86b43b;
 }
 
+/* Cancelling is the one button here that removes something, so it looks like it. */
+.stw-btn-danger {
+  background: #8c3a3a;
+  color: #fff;
+}
+
+.stw-btn-danger:hover:not(:disabled) {
+  background: #a94a4a;
+}
+
 .stw-rows {
   overflow: auto;
   padding: 0 8px 8px;
@@ -245,6 +255,12 @@
 
 .stw-row[data-kind="fail"] {
   border-left-color: #e35a4f;
+}
+
+/** Nobody checked this one. Deliberately not the same grey as a settled skip. */
+.stw-row[data-kind="unsure"] {
+  border-left-color: #6b7f95;
+  border-left-style: dashed;
 }
 
 .stw-name {
@@ -446,4 +462,137 @@
 
 .stw-chart-span {
   color: #5c6874;
+}
+
+.stw-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #2a475e;
+  border-radius: 3px;
+  background: #16202d;
+  color: #c7d5e0;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+.stw-input::placeholder {
+  color: #6a7a86;
+}
+
+.stw-toggles {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.stw-toggle {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  color: #8f98a0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.stw-btn-thin {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  font-size: 11px;
+}
+
+.stw-whyrow {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stw-hint {
+  padding: 6px 12px 0;
+  font-size: 11px;
+  color: #6a7a86;
+}
+
+/**
+ * Only dropped copies are marked. A full selection is the normal case and must
+ * leave Steam's grid looking untouched.
+ */
+[data-stw-pick="0"] {
+  opacity: 0.45;
+}
+
+[data-stw-pick="0"] .stw-badge {
+  text-decoration: line-through;
+}
+
+/* --- trade-offer inbox --- */
+
+.stw-link {
+  color: #66c0f4;
+  text-decoration: none;
+}
+
+.stw-link:hover {
+  text-decoration: underline;
+}
+
+.stw-tag {
+  color: #8f98a0;
+  font-size: 11px;
+}
+
+/** A flag is the point of the row, so it is allowed to wrap and to be loud. */
+.stw-flag {
+  white-space: normal;
+}
+
+.stw-flag[data-level="danger"] {
+  color: #e35a4f;
+}
+
+.stw-flag[data-level="warn"] {
+  color: #e4b85c;
+}
+
+/* The price ladder: what it sells for, against what it asks now. */
+.stw-ladder {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 6px 0;
+  padding: 6px 8px;
+  background: #16202d;
+  border-radius: 3px;
+}
+
+.stw-ladder-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.stw-ladder-l {
+  flex: 1;
+  color: #8f98a0;
+}
+
+.stw-ladder-v {
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
+}
+
+.stw-ladder-d {
+  min-width: 92px;
+  text-align: right;
+  color: #8f98a0;
+  font-variant-numeric: tabular-nums;
+}
+
+.stw-ladder-d[data-level="ok"] {
+  color: #a4d007;
+}
+
+.stw-ladder-d[data-level="warn"] {
+  color: #e4b85c;
 }

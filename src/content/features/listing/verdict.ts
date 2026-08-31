@@ -1,3 +1,4 @@
+import type { PlainOrderBook } from "../../../page/ssr";
 import type { Cents } from "../../../core/types";
 import type { HistoryStats } from "../../../steam/pricehistory";
 
@@ -78,4 +79,56 @@ export function describeLiquidity(stats: HistoryStats): string {
   if (perDay >= 1) return `~${Math.round(perDay)} шт. в день`;
   const daysPerSale = Math.round(1 / perDay);
   return `редкий товар, примерно одна продажа за ${daysPerSale} дн.`;
+}
+
+/**
+ * The demand side, in one line.
+ *
+ * Everything else the panel says is about sellers: what the cheapest lot asks,
+ * what the item has been going for. None of it answers the question a holder
+ * actually has — «if I want out today, what will I get» — and the page has the
+ * answer sitting in it for free. The highest standing buy order is a price that
+ * pays out the moment a lot is listed at it.
+ *
+ * The spread is given as money and as a share, because neither alone means
+ * anything: measured live, 0,18 ₽ between the sides is nothing on a 15 000 ₽
+ * rifle and a fifth of a cheap sticker.
+ */
+export function describeDemand(
+  book: PlainOrderBook | null | undefined,
+  money: (cents: Cents | null) => string
+): string {
+  if (!book) return "";
+  const counts = `заявок ${book.buyOrders} против ${book.sellOrders} лотов`;
+  if (book.maxBuy == null) return `никто не выставил заявку на покупку · ${counts}`;
+
+  const head = `покупают по ${money(book.maxBuy)}`;
+  if (book.minSell == null || book.minSell <= book.maxBuy) {
+    return `${head} — столько же, сколько просят продавцы · ${counts}`;
+  }
+
+  const spread = book.minSell - book.maxBuy;
+  const share = (spread / book.minSell) * 100;
+  const rounded = Math.round(share * 10) / 10;
+  const pct = rounded < 0.1 ? "<0,1%" : `${String(rounded).replace(".", ",")}%`;
+  return `${head}, продают по ${money(book.minSell)} · разница ${money(spread)} (${pct}) · ${counts}`;
+}
+
+/**
+ * What stands where the lot rows would be, when there are none.
+ *
+ * Three different situations used to share one sentence — «Нажми «Посмотреть
+ * цену».» — including the one where the user had just pressed it. On a grouped
+ * page that is the normal outcome, not an edge: measured on the live Redline
+ * page, all twenty rows Steam ships are Battle-Scarred and Well-Worn while the
+ * page itself is focused on Minimal Wear, so the panel had the price, the
+ * average, the verdict and the chart, and under them told the reader to press
+ * the button again.
+ */
+export function describeNoListings(checked: boolean, marketLow: Cents | null): string {
+  if (!checked) return "Нажми «Посмотреть цену».";
+  if (marketLow != null) {
+    return "Отдельных лотов этого предмета страница не прислала — только цену по нему.";
+  }
+  return "Лотов на продажу не нашлось.";
 }

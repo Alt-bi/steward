@@ -1,0 +1,27 @@
+{
+ "success": true,
+ "pagesize": 10,
+ "start": 0,
+ "total_count": 761,
+ "num_active_listings": 761,
+ "hovers": "\tCreateItemHoverFromContainer( g_rgAssets, 'mylisting_555779260420047567_name', 753, '6', '38162536060', 1 );\n\tCreateItemHoverFromContainer( g_rgAssets, 'mylisting_555779260420047567_image', 753, '6', '38162536060', 1 );\n\tCreateItemHoverFromContainer( g_rgAssets, 'mylisting_555779260420050411_name', 753, '6', '38161958638', 1 );\n\tCreateItemHoverFromContainer( g_rgAssets, 'mylisting_555779260420050411_image', 753, '6', '38161958638', 1 );",
+ "assets": {
+  "753": {
+   "6": {
+    "38162536060": {
+     "appid": 753,
+     "contextid": "6",
+     "id": "38162536060",
+     "amount": "1",
+     "market_hash_name": "318680-Remy Chaveau",
+     "market_name": "318680-Remy Chaveau",
+     "name": "Remy Chaveau",
+     "marketable": 1,
+     "tradable": 1,
+     "commodity": 1
+    }
+   }
+  }
+ },
+ "results_html": "<div id=\"tabContentsMyActiveMarketListingsTable\" class=\"market_content_block\"><div class=\"market_listing_row market_recent_listing_row listing_555779260420047567\" id=\"mylisting_555779260420047567\"><div class=\"market_listing_price market_listing_my_price\">5,27 руб.<br>(3,55 руб.)</div><span id=\"mylisting_555779260420047567_name\" class=\"market_listing_item_name\"><a class=\"market_listing_item_name_link\" href=\"https://steamcommunity.com/market/listings/753/318680-Remy%20Chaveau\">Remy Chaveau</a></span></div></div>"
+}

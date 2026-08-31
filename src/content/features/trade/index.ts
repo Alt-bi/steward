@@ -1,7 +1,7 @@
 import { formatCents } from "../../../core/money";
 import { loadSettings, type Settings } from "../../../core/settings";
 import type { Cents, ItemKeyed } from "../../../core/types";
-import { SteamError, type WaitReason } from "../../../steam/net";
+import { allowSteamTraffic, SteamError, type WaitReason } from "../../../steam/net";
 import { currencyId, waitForPage } from "../../../steam/page-context";
 import { fetchMarketLows } from "../../../steam/prices";
 import {
@@ -12,6 +12,7 @@ import {
   type TradeSnapshot,
 } from "../../../steam/trade";
 import { el, type StatusKind } from "../../ui/panel";
+import { describeError } from "../../ui/errors";
 import { register, type FeatureContext } from "../registry";
 import { analyzeTrade, itemKey, type TradeAnalysis, type TradeWarning } from "./analyze";
 
@@ -33,23 +34,6 @@ interface State {
 
 function money(cents: Cents | null | undefined): string {
   return formatCents(cents, currencyId());
-}
-
-function describeError(err: unknown): string {
-  if (err instanceof SteamError) {
-    switch (err.kind) {
-      case "not_logged_in":
-        return "нужен логин Steam в этой вкладке";
-      case "rate_limited":
-      case "blocked":
-        return "Steam упёрся в лимит";
-      case "aborted":
-        return "остановлено";
-      default:
-        return err.message;
-    }
-  }
-  return err instanceof Error ? err.message : String(err);
 }
 
 async function mount(ctx: FeatureContext): Promise<void> {
@@ -240,6 +224,12 @@ async function mount(ctx: FeatureContext): Promise<void> {
     if (state.busy) return;
     state.abort = false;
     setBusy(true);
+    const quiet = await allowSteamTraffic();
+    if (quiet) {
+      status(quiet, "warn");
+      setBusy(false);
+      return;
+    }
     state.settings = await loadSettings();
 
     await waitForPage();

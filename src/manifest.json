@@ -32,7 +32,9 @@
       "matches": [
         "https://steamcommunity.com/market/*",
         "https://steamcommunity.com/id/*/inventory*",
-        "https://steamcommunity.com/profiles/*/inventory*"
+        "https://steamcommunity.com/profiles/*/inventory*",
+        "https://steamcommunity.com/id/*/tradeoffers*",
+        "https://steamcommunity.com/profiles/*/tradeoffers*"
       ],
       "js": [
         "page-bridge.js"
@@ -56,6 +58,8 @@
         "https://steamcommunity.com/market/*",
         "https://steamcommunity.com/id/*/inventory*",
         "https://steamcommunity.com/profiles/*/inventory*",
+        "https://steamcommunity.com/id/*/tradeoffers*",
+        "https://steamcommunity.com/profiles/*/tradeoffers*",
         "https://steamcommunity.com/tradeoffer/*"
       ],
       "js": [

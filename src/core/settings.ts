@@ -35,11 +35,11 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  delayMs: 1600,
+  delayMs: 2500,
   undercutCents: 1,
   skipSelfUndercut: true,
   onePerItem: true,
-  scanConcurrency: 4,
+  scanConcurrency: 2,
   exactCompetitorLow: true,
   priceSource: "search",
   priceTtlMinutes: 15,
@@ -68,10 +68,10 @@ export async function saveSettings(patch: Partial<Settings>): Promise<void> {
 
 export function clampSettings(s: Partial<Settings>): Partial<Settings> {
   const out: Partial<Settings> = { ...s };
-  if (out.delayMs != null) out.delayMs = Math.min(8000, Math.max(900, Math.trunc(out.delayMs) || 1600));
+  if (out.delayMs != null) out.delayMs = Math.min(8000, Math.max(1500, Math.trunc(out.delayMs) || 2500));
   if (out.undercutCents != null) out.undercutCents = Math.min(500, Math.max(1, Math.trunc(out.undercutCents) || 1));
   if (out.scanConcurrency != null) {
-    out.scanConcurrency = Math.min(8, Math.max(1, Math.trunc(out.scanConcurrency) || 4));
+    out.scanConcurrency = Math.min(4, Math.max(1, Math.trunc(out.scanConcurrency) || 2));
   }
   if (out.priceTtlMinutes != null) {
     out.priceTtlMinutes = Math.min(1440, Math.max(1, Math.trunc(out.priceTtlMinutes) || 15));

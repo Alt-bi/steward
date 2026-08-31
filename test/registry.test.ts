@@ -6,6 +6,7 @@ import { DEFAULT_SETTINGS } from "../src/core/settings";
 
 /** Importing the features is what registers them. */
 import "../src/content/features/reprice";
+import "../src/content/features/buyorders";
 import "../src/content/features/inventory";
 import "../src/content/features/trade";
 import "../src/content/features/listing";
@@ -18,11 +19,17 @@ describe("feature routing", () => {
   it("registers every feature exactly once", () => {
     const ids = allFeatures().map((f) => f.id);
     assert.deepEqual([...new Set(ids)].sort(), ids.slice().sort(), "no duplicate registrations");
-    assert.deepEqual(ids.slice().sort(), ["inventory", "listing", "reprice", "trade"]);
+    assert.deepEqual(ids.slice().sort(), ["buyorders", "inventory", "listing", "reprice", "trade"]);
   });
 
-  it("puts reprice on the market front page", () => {
-    assert.deepEqual(idsFor("https://steamcommunity.com/market/"), ["reprice"]);
+  it("puts reprice and buy orders on the market front page", () => {
+    /** Both tables live there: our listings and our standing orders. */
+    assert.deepEqual(idsFor("https://steamcommunity.com/market/"), ["reprice", "buyorders"]);
+  });
+
+  it("keeps the buy-order tab off the market subpages that have no orders", () => {
+    assert.deepEqual(idsFor("https://steamcommunity.com/market/search"), ["reprice"]);
+    assert.deepEqual(idsFor("https://steamcommunity.com/market/mylistings"), ["reprice"]);
   });
 
   it("hands a single item page to the listing tab alone", () => {
@@ -52,9 +59,9 @@ describe("feature routing", () => {
     assert.deepEqual(idsFor("https://steamcommunity.com/id/someone/"), []);
   });
 
-  it("honours a feature turned off in settings", () => {
+  it("honours a feature turned off in settings, and only that one", () => {
     const off = { ...DEFAULT_SETTINGS, features: { reprice: false } };
     const ids = activeFeatures(new URL("https://steamcommunity.com/market/"), off).map((f) => f.id);
-    assert.deepEqual(ids, []);
+    assert.deepEqual(ids, ["buyorders"]);
   });
 });

@@ -11,6 +11,8 @@
  * these objects cannot reach the extension or break the handoff.
  */
 
+import { isHiddenInventoryPage, parseTileId } from "../core/tiles";
+
 function str(value: unknown): string | undefined {
   return typeof value === "string" || typeof value === "number" ? String(value) : undefined;
 }
@@ -106,12 +108,26 @@ export interface PlainAsset {
   market_name?: string;
   name?: string;
   commodity?: number;
+  marketable?: number;
+  tradable?: number;
+}
+
+function hashFromAsset(asset: Record<string, unknown>): string | undefined {
+  const desc = isRecord(asset.description) ? asset.description : null;
+  return (
+    str(asset.market_hash_name) ??
+    str(desc?.market_hash_name) ??
+    str(asset.market_name) ??
+    str(desc?.market_name) ??
+    str(asset.name) ??
+    str(desc?.name)
+  );
 }
 
 /**
- * `g_rgAssets` — three levels of appid, contextid, assetid. Only the four fields
- * the listing merger reads survive, which also shrinks a big inventory by orders
- * of magnitude.
+ * `g_rgAssets` — three levels of appid, contextid, assetid. Steam often leaves
+ * the hash on a nested `description`; we lift it so the isolated world does not
+ * have to know that shape.
  */
 export function projectAssets(
   raw: unknown
@@ -129,12 +145,15 @@ export function projectAssets(
 
       for (const [assetid, asset] of Object.entries(byAsset)) {
         if (!isRecord(asset)) continue;
+        const desc = isRecord(asset.description) ? asset.description : null;
         assets[assetid] = compact({
-          amount: scalar(asset.amount),
-          market_hash_name: str(asset.market_hash_name),
-          market_name: str(asset.market_name),
-          name: str(asset.name),
-          commodity: int(asset.commodity),
+          amount: scalar(asset.amount) ?? scalar(desc?.amount),
+          market_hash_name: hashFromAsset(asset),
+          market_name: str(asset.market_name) ?? str(desc?.market_name),
+          name: str(asset.name) ?? str(desc?.name),
+          commodity: int(asset.commodity) ?? int(desc?.commodity),
+          marketable: int(asset.marketable) ?? int(desc?.marketable),
+          tradable: int(asset.tradable) ?? int(desc?.tradable),
         });
       }
       contexts[contextid] = assets;
@@ -144,10 +163,102 @@ export function projectAssets(
   return out;
 }
 
+export interface PlainVisibleItem {
+  appid?: number;
+  contextid?: string;
+  assetid?: string;
+  amount?: string | number;
+  market_hash_name?: string;
+  market_name?: string;
+  name?: string;
+  marketable?: number;
+  tradable?: number;
+}
+
+/**
+ * Steam hangs the live item off the tile as `rgItem` (circular: it points back
+ * at the element). Only named fields leave this function, so postMessage can
+ * clone it.
+ */
+export function projectRgItem(raw: unknown, tileId?: string): PlainVisibleItem | null {
+  const rec = isRecord(raw) ? raw : null;
+  const desc = rec && isRecord(rec.description) ? rec.description : null;
+  const fromId = parseTileId(tileId);
+  const appid = int(rec?.appid) ?? fromId?.appid;
+  const contextid = str(rec?.contextid) ?? fromId?.contextid;
+  const assetid = str(rec?.assetid) ?? str(rec?.id) ?? fromId?.assetid;
+  const hash = rec ? hashFromAsset(rec) : undefined;
+  if (appid == null || !contextid || !assetid || !hash) return null;
+  return compact({
+    appid,
+    contextid,
+    assetid,
+    amount: scalar(rec?.amount) ?? scalar(desc?.amount) ?? 1,
+    market_hash_name: hash,
+    market_name: str(rec?.market_name) ?? str(desc?.market_name),
+    name: str(rec?.name) ?? str(desc?.name),
+    marketable: int(rec?.marketable) ?? int(desc?.marketable),
+    tradable: int(rec?.tradable) ?? int(desc?.tradable),
+  });
+}
+
+/**
+ * Tiles on the current inventory page, with names taken from `rgItem`. Hidden
+ * Steam pages (`display:none`) are skipped — that is the SIH "what you see" set.
+ */
+export function projectVisibleInventory(root?: ParentNode | null): PlainVisibleItem[] | null {
+  const host = root ?? (typeof document !== "undefined" ? document : null);
+  if (!host || typeof host.querySelectorAll !== "function") return null;
+  try {
+    const nodes = host.querySelectorAll(".item[id], .inventory_page .item[id]");
+    const out: PlainVisibleItem[] = [];
+    const seen = new Set<string>();
+    for (const node of nodes) {
+      const el = node as HTMLElement & { rgItem?: unknown };
+      const page = typeof el.closest === "function" ? el.closest(".inventory_page") : null;
+      if (isHiddenInventoryPage(page)) continue;
+      const item = projectRgItem(el.rgItem, el.id || el.getAttribute?.("id") || undefined);
+      if (!item?.assetid || item.appid == null || !item.contextid) continue;
+      const key = `${item.appid}_${item.contextid}_${item.assetid}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+    return out.length ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Posts to the page, refusing to let a clone failure escape as an uncaught error.
  * The projections above should make that impossible; this is the net under them.
  */
+export interface PlainListing {
+  listingid?: string;
+  price?: string | number;
+  fee?: string | number;
+  converted_price?: string | number;
+  converted_fee?: string | number;
+}
+
+/** `g_rgListingInfo` on a single-item market page — already the cheapest lots. */
+export function projectListingInfo(raw: unknown): Record<string, PlainListing> | null {
+  if (!isRecord(raw)) return null;
+  const out: Record<string, PlainListing> = {};
+  for (const [id, row] of Object.entries(raw)) {
+    if (!isRecord(row)) continue;
+    out[id] = compact({
+      listingid: str(row.listingid) ?? id,
+      price: scalar(row.price),
+      fee: scalar(row.fee),
+      converted_price: scalar(row.converted_price),
+      converted_fee: scalar(row.converted_fee),
+    });
+  }
+  return out;
+}
+
 export function safePost(payload: unknown, label: string): boolean {
   try {
     window.postMessage(payload, "*");

@@ -4,6 +4,7 @@ import type { Cents, ItemKeyed } from "../core/types";
 import { fetchJson, SteamError, type Pacing } from "./net";
 import { country, currencyId } from "./page-context";
 import { batchingRatio, fetchGroupPrices, groupForSearch } from "./search";
+import { learnGroups } from "./grouping";
 
 /**
  * Market minimums for a set of items.
@@ -35,8 +36,19 @@ const SEARCH_SAMPLE = 6;
 /** Fraction of sampled groups that must match, or we stop trusting search. */
 const SEARCH_MIN_HIT_RATE = 0.3;
 
-function cacheKey(item: ItemKeyed): string {
+/**
+ * Where a market minimum lives in the shared cache.
+ *
+ * Exported because the listing book returns the same number as a by-product of a
+ * request that was going to happen anyway, and a fresher answer thrown away is a
+ * request paid for twice.
+ */
+export function priceCacheKey(item: Pick<ItemKeyed, "appid" | "hash">): string {
   return `low:${currencyId()}:${item.appid}:${item.hash}`;
+}
+
+function cacheKey(item: ItemKeyed): string {
+  return priceCacheKey(item);
 }
 
 async function fetchOverview(item: ItemKeyed, pacing: Pacing): Promise<Cents> {
@@ -67,6 +79,13 @@ export interface ScanOptions extends Pacing {
   ttlMs?: number;
   /** Try the per-item endpoint for whatever a search could not resolve. */
   fallbackToOverview?: boolean;
+  /**
+   * Answer from the cache and stop; nothing leaves the browser.
+   *
+   * For a caller that is about to ask a better endpoint the same question: the
+   * cache is free, so it is always worth reading, and `priceoverview` is not.
+   */
+  cacheOnly?: boolean;
   onProgress?: (done: number, total: number, label: string) => void;
 }
 
@@ -85,8 +104,9 @@ export interface LowsResult {
 
 function stopKind(err: unknown): "blocked" | "aborted" | null {
   if (!(err instanceof SteamError)) return null;
-  if (err.kind === "blocked") return "blocked";
   if (err.kind === "aborted") return "aborted";
+  /** 429 and the HTML sorry-page are Steam telling us to stop, not a missing price. */
+  if (err.kind === "blocked" || err.kind === "rate_limited") return "blocked";
   return null;
 }
 
@@ -133,9 +153,25 @@ export async function fetchMarketLows(items: ItemKeyed[], opts: ScanOptions): Pr
   }
   if (!pending.length) return result;
 
+  if (opts.cacheOnly) {
+    result.unresolved = pending;
+    for (const item of pending) if (!(item.key in lows)) lows[item.key] = null;
+    return result;
+  }
+
   const fresh: { key: string; cents: number; ttlMs: number }[] = [];
   const resolved = new Set<string>();
   let done = items.length - pending.length;
+  let haltNetwork = false;
+  const pacing: Pacing = {
+    abort: () => Boolean(opts.abort?.() || haltNetwork),
+    onWait: opts.onWait,
+  };
+
+  function noteStop(kind: "blocked" | "aborted"): void {
+    haltNetwork = true;
+    result.stopped ??= kind;
+  }
 
   /** One price applies to every listing of that item. */
   function accept(item: ItemKeyed, cents: Cents | null): void {
@@ -162,18 +198,19 @@ export async function fetchMarketLows(items: ItemKeyed[], opts: ScanOptions): Pr
 
     for (let i = 0; i < groups.length; i++) {
       const group = groups[i]!;
-      if (opts.abort?.()) {
-        result.stopped ??= "aborted";
+      if (pacing.abort?.()) {
+        noteStop("aborted");
         return;
       }
       opts.onProgress?.(done, items.length, `поиск ${i + 1}/${groups.length} · ${group.query}`);
       try {
-        const found = await fetchGroupPrices(group, opts);
+        const found = await fetchGroupPrices(group, pacing);
         result.requests += 1;
         attempted += 1;
+        learnGroups(group.appid, found.groupIds);
         let matched = 0;
         for (const item of group.items) {
-          const cents = found.get(item.hash);
+          const cents = found.prices.get(item.hash);
           if (cents != null) {
             accept(item, cents);
             matched += 1;
@@ -183,7 +220,7 @@ export async function fetchMarketLows(items: ItemKeyed[], opts: ScanOptions): Pr
       } catch (err) {
         const stop = stopKind(err);
         if (stop) {
-          result.stopped ??= stop;
+          noteStop(stop);
           return;
         }
         if (err instanceof SteamError && err.kind === "not_logged_in") throw err;
@@ -209,9 +246,9 @@ export async function fetchMarketLows(items: ItemKeyed[], opts: ScanOptions): Pr
 
     async function worker(): Promise<void> {
       for (;;) {
-        if (halted) return;
-        if (opts.abort?.()) {
-          result.stopped ??= "aborted";
+        if (halted || haltNetwork) return;
+        if (pacing.abort?.()) {
+          noteStop("aborted");
           halted = true;
           return;
         }
@@ -219,20 +256,23 @@ export async function fetchMarketLows(items: ItemKeyed[], opts: ScanOptions): Pr
         if (!item) return;
 
         try {
-          const cents = await fetchOverview(item, opts);
+          const cents = await fetchOverview(item, pacing);
           result.requests += 1;
           accept(item, cents);
         } catch (err) {
           const stop = stopKind(err);
           if (stop) {
-            result.stopped ??= stop;
+            noteStop(stop);
             halted = true;
             return;
           }
           if (err instanceof SteamError && err.kind === "not_logged_in") throw err;
-          /** A genuinely unpriceable item is resolved as "no price", not retried forever. */
+          /**
+           * `success:false` is how Steam throttles priceoverview as often as how it
+           * answers for a delisted item. Marking it resolved-as-null burned the rest
+           * of a scan and hid those keys from «Догрузить цены». Leave them open.
+           */
           result.requests += 1;
-          accept(item, null);
         }
         opts.onProgress?.(done, items.length, item.name);
       }

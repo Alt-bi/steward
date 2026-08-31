@@ -1,7 +1,8 @@
 import { buyerPrice, sellerForBuyer, type FeeConfig } from "../../../core/fees";
-import { describeStrategy, targetForStrategy, type SellSettings } from "../../../core/sell";
+import { strategyTarget, type SellSettings } from "../../../core/sell";
 import type { Cents } from "../../../core/types";
 import type { InventoryGroup, InventoryItem } from "../../../steam/inventory";
+import type { HistoryStats } from "../../../steam/pricehistory";
 
 /**
  * Turns "I want to sell this inventory" into concrete `sellitem` orders.
@@ -51,6 +52,13 @@ export interface BuildSellPlansInput {
   publisherFeePercent?: (appid: number) => number;
   /** Only these groups, when the user picked a subset. */
   onlyKeys?: ReadonlySet<string>;
+  /**
+   * Only these copies. Tiles are picked one at a time, and a stack of ten where
+   * three are ticked must list those three — not the first three.
+   */
+  onlyAssets?: ReadonlySet<string>;
+  /** Group key -> what the item has been selling for. Only the `avg` strategies need it. */
+  stats?: Record<string, HistoryStats | null>;
 }
 
 export function buildSellPlans(input: BuildSellPlansInput): SellPlan[] {
@@ -69,6 +77,10 @@ export function buildSellPlans(input: BuildSellPlansInput): SellPlan[] {
     let listed = 0;
 
     for (const item of ordered) {
+      if (input.onlyAssets && !input.onlyAssets.has(item.assetid)) {
+        plans.push(skip(item, marketLow, "снят с выбора"));
+        continue;
+      }
       if (!item.marketable) {
         plans.push(skip(item, marketLow, "не продаётся на маркете"));
         continue;
@@ -82,13 +94,17 @@ export function buildSellPlans(input: BuildSellPlansInput): SellPlan[] {
         continue;
       }
 
-      const wanted = targetForStrategy(marketLow, settings);
-      if (wanted < 1) {
+      const target = strategyTarget(marketLow, settings, input.stats?.[group.key] ?? null);
+      if (target.buyer == null) {
+        plans.push(skip(item, marketLow, target.reason));
+        continue;
+      }
+      if (target.buyer < 1) {
         plans.push(skip(item, marketLow, "нельзя ниже минимума Steam"));
         continue;
       }
 
-      const targetSeller = sellerForBuyer(wanted, pub, fees);
+      const targetSeller = sellerForBuyer(target.buyer, pub, fees);
       if (targetSeller < 1) {
         plans.push(skip(item, marketLow, "не собралась цена продавца"));
         continue;
@@ -102,7 +118,7 @@ export function buildSellPlans(input: BuildSellPlansInput): SellPlan[] {
 
       listed += 1;
       plans.push({
-        ...skip(item, marketLow, describeStrategy(settings)),
+        ...skip(item, marketLow, target.reason),
         action: "sell",
         targetBuyer,
         targetSeller,

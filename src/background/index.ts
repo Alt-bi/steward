@@ -1,5 +1,6 @@
 import { serve, type Handlers, type LogRow } from "../core/messaging";
 import * as cache from "./cache";
+import * as naming from "./naming";
 import * as scheduler from "./scheduler";
 
 /** Ring buffer of what Steam told us, for the panel's diagnostics view. */
@@ -42,9 +43,21 @@ const handlers: Handlers = {
   },
 
   "cache/clear": async () => {
-    await cache.clear();
-    return { ok: true };
-  },
+      await cache.clear();
+      return { ok: true };
+    },
+
+    "naming/get": async ({ keys }) => ({ hits: await naming.get(keys) }),
+
+    "naming/set": async ({ entries }) => {
+      await naming.set(entries);
+      return { ok: true };
+    },
+
+    "naming/drop": async ({ keys }) => {
+      await naming.drop(keys);
+      return { ok: true };
+    },
 
   "log/note": ({ kind, detail }) => {
     note(kind, detail);

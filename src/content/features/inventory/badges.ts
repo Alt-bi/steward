@@ -1,38 +1,102 @@
+import { isHiddenInventoryPage, parseTileId, type TileRef } from "../../../core/tiles";
 import type { Cents } from "../../../core/types";
 import type { InventoryItem } from "../../../steam/inventory";
 
 /**
  * Price labels drawn onto Steam's own inventory tiles.
  *
- * Steam gives every tile an id of `{appid}_{contextid}_{assetid}`, which is the
- * only stable hook here — class names and nesting change, that pattern has not.
- * Parsing it is kept separate and tested; the injection itself stays defensive and
- * silently does nothing when the markup is not what we expect, so a Steam redesign
- * degrades the badges rather than the feature.
+ * The tile id and what counts as a visible page live in `core/tiles`, because the
+ * MAIN-world projection reads the same nodes. The injection here stays defensive
+ * and silently does nothing when the markup is not what we expect, so a Steam
+ * redesign degrades the badges rather than the feature.
  */
 
 const BADGE_CLASS = "stw-badge";
 const MARK_ATTR = "data-stw-badge";
-const TILE_ID = /^(\d+)_(\d+)_(\d+)$/;
 
-export interface TileRef {
-  appid: number;
-  contextid: string;
-  assetid: string;
-}
+export { parseTileId };
+export type { TileRef };
 
-export function parseTileId(id: string | null | undefined): TileRef | null {
-  const match = TILE_ID.exec(String(id ?? ""));
-  if (!match) return null;
-  const [, appid, contextid, assetid] = match;
-  if (!appid || !contextid || !assetid) return null;
-  return { appid: Number(appid), contextid, assetid };
+/**
+ * Inventory tiles Steam is actually showing. Hidden pages stay out — that is the
+ * set SIH prices, not the whole backpack.
+ */
+export function visibleTileRefs(root: ParentNode): TileRef[] {
+  const out: TileRef[] = [];
+  const seen = new Set<string>();
+  let tiles: NodeListOf<Element> | Element[];
+  try {
+    tiles = root.querySelectorAll("[id]");
+  } catch {
+    return out;
+  }
+
+  let hasPages = false;
+  try {
+    hasPages = root.querySelector(".inventory_page") != null;
+  } catch {
+    hasPages = false;
+  }
+
+  for (const tile of tiles) {
+    const ref = parseTileId(tile.getAttribute("id"));
+    if (!ref) continue;
+    if (hasPages) {
+      const page = typeof tile.closest === "function" ? tile.closest(".inventory_page") : null;
+      if (!page || isHiddenInventoryPage(page)) continue;
+    }
+    const key = `${ref.appid}_${ref.contextid}_${ref.assetid}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(ref);
+  }
+  return out;
 }
 
 export interface BadgeData {
   /** assetid -> what one copy is worth. */
   priceByAsset: Map<string, Cents | null>;
   format: (cents: Cents | null) => string;
+  /** Whether this copy is ticked for selling. Absent means "do not mark tiles". */
+  picked?: (assetid: string) => boolean;
+}
+
+/**
+ * Whether a click on the inventory grid was meant for us.
+ *
+ * A plain click belongs to Steam — it opens the item — so picking is bound to
+ * Ctrl (⌘ on a Mac), which Steam's own grid does not use. Kept as a pure function
+ * so the rule is testable without a browser.
+ */
+export function tilePickFromEvent(event: {
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  button?: number;
+  target?: unknown;
+}): TileRef | null {
+  if (!(event.ctrlKey || event.metaKey)) return null;
+  if (event.button != null && event.button !== 0) return null;
+  const target = event.target as { closest?: (sel: string) => unknown } | null;
+  if (!target || typeof target.closest !== "function") return null;
+  const tile = target.closest(".item[id]") as { getAttribute?: (n: string) => string | null } | null;
+  if (!tile || typeof tile.getAttribute !== "function") return null;
+  return parseTileId(tile.getAttribute("id"));
+}
+
+/**
+ * Ctrl+click on a tile toggles that copy. Bound in the capture phase and stopped
+ * there: Steam's own click handler would otherwise open the item at the same time.
+ */
+export function watchTilePicks(root: Node, onPick: (ref: TileRef) => void): () => void {
+  const handler = (event: Event): void => {
+    const ref = tilePickFromEvent(event as MouseEvent);
+    if (!ref) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onPick(ref);
+  };
+  root.addEventListener("click", handler, true);
+  return () => root.removeEventListener("click", handler, true);
 }
 
 /** Builds the assetid lookup a badge pass needs. */
@@ -96,6 +160,10 @@ export function paintBadges(root: ParentNode, data: BadgeData): PaintResult {
     badge.textContent = data.format(price);
     badge.dataset.stwKnown = price == null ? "0" : "1";
     (tile as HTMLElement).setAttribute(MARK_ATTR, "1");
+    /** Only the dropped copies are marked; a full selection must look untouched. */
+    if (data.picked) {
+      (tile as HTMLElement).dataset.stwPick = data.picked(ref.assetid) ? "1" : "0";
+    }
     painted += 1;
   }
 
@@ -105,7 +173,10 @@ export function paintBadges(root: ParentNode, data: BadgeData): PaintResult {
 export function clearBadges(root: ParentNode): void {
   try {
     for (const badge of root.querySelectorAll(`.${BADGE_CLASS}`)) badge.remove();
-    for (const tile of root.querySelectorAll(`[${MARK_ATTR}]`)) tile.removeAttribute(MARK_ATTR);
+    for (const tile of root.querySelectorAll(`[${MARK_ATTR}]`)) {
+      tile.removeAttribute(MARK_ATTR);
+      (tile as HTMLElement).removeAttribute("data-stw-pick");
+    }
   } catch {
     /* nothing to clean up */
   }

@@ -40,7 +40,13 @@ export class Panel {
 
     const head = el("div", "stw-head");
     const titles = el("div", "stw-titles");
-    titles.append(el("div", "stw-title", "Steward"), el("div", "stw-sub", subtitle));
+    /**
+     * The version belongs in the corner the user actually looks at. Without it,
+     * a session running a build from before a fix reports that fix's bugs
+     * verbatim — every "still broken" report is a version check first.
+     */
+    const version = chrome.runtime.getManifest().version;
+    titles.append(el("div", "stw-title", `Steward ${version}`), el("div", "stw-sub", subtitle));
 
     const collapse = el("button", "stw-iconbtn", "–");
     collapse.type = "button";

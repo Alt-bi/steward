@@ -7,7 +7,9 @@ import { Panel, panelExists } from "./ui/panel";
 
 /** Importing a feature is what registers it. */
 import "./features/reprice";
+import "./features/buyorders";
 import "./features/inventory";
+import "./features/offers";
 import "./features/trade";
 import "./features/listing";
 

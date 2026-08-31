@@ -168,3 +168,58 @@ describe("plannedProceeds", () => {
     assert.equal(plannedProceeds([]), 0);
   });
 });
+
+describe("buildSellPlans with copies picked on the tiles", () => {
+  const items = [
+    item("1", "Chroma Case"),
+    item("2", "Chroma Case"),
+    item("3", "Chroma Case"),
+  ];
+  const lows = { "730\tChroma Case": 900 };
+
+  function planPicked(picked: string[]) {
+    return buildSellPlans({
+      groups: groupInventory(items),
+      lows,
+      settings: { ...DEFAULT_SELL_SETTINGS },
+      fees,
+      onlyAssets: new Set(picked),
+    });
+  }
+
+  it("lists exactly the copies that were picked, not the first N", () => {
+    const plans = planPicked(["3", "1"]);
+    assert.deepEqual(
+      selling(plans).map((p) => p.assetid),
+      ["1", "3"],
+      "stable assetid order, and copy 2 stays out"
+    );
+  });
+
+  it("says why the untouched copies were left alone", () => {
+    const skipped = planPicked(["1"]).filter((p) => p.action === "skip");
+    assert.deepEqual(
+      skipped.map((p) => p.assetid),
+      ["2", "3"]
+    );
+    assert.ok(
+      skipped.every((p) => p.reason.includes("снят")),
+      skipped[0]?.reason ?? "no skip reason"
+    );
+  });
+
+  it("plans nothing when every copy was unticked", () => {
+    assert.deepEqual(selling(planPicked([])), []);
+  });
+
+  it("still respects the per-pass cap on top of the picked copies", () => {
+    const plans = buildSellPlans({
+      groups: groupInventory(items),
+      lows,
+      settings: { ...DEFAULT_SELL_SETTINGS, maxPerItem: 2 },
+      fees,
+      onlyAssets: new Set(["1", "2", "3"]),
+    });
+    assert.equal(selling(plans).length, 2);
+  });
+});

@@ -17,7 +17,7 @@ It runs on `steamcommunity.com` pages (inventory, Community Market, trade offers
 
 | Permission | Why |
 |---|---|
-| `storage` | Settings, the price cache, and the request-budget counters stay in your browser profile. |
+| `storage` | Settings, the price cache, sale histories, the panel choices you made last (sort order, price level), the names of items Steam has already told us about, and the request-budget counters stay in your browser profile. |
 | `https://steamcommunity.com/*` | Market prices, listings, inventory, and trade pages. Every network call Steward makes goes here. |
 
 Nothing is uploaded. Clearing the extension's storage, or uninstalling it, removes everything it kept.

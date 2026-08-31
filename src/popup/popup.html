@@ -14,9 +14,13 @@
     <button id="open-market" type="button">Открыть маркет Steam</button>
 
     <label class="field">
-      <span>Пауза при перестановке, мс</span>
-      <input id="delay" type="number" min="900" max="8000" step="100" />
+      <span>Пауза между продажами, мс</span>
+      <input id="delay" type="number" min="1500" max="8000" step="100" />
     </label>
+    <p class="fine">
+      Только между <em>продажами</em> и перестановками, не между чтением цен. Ниже 1.5 с Steam
+      банит IP.
+    </p>
 
     <label class="field">
       <span>На сколько ниже конкурента, коп.</span>
@@ -38,7 +42,7 @@
 
     <label class="field">
       <span>Параллельных запросов цен</span>
-      <input id="concurrency" type="number" min="1" max="8" step="1" />
+      <input id="concurrency" type="number" min="1" max="4" step="1" />
     </label>
 
     <label class="check">

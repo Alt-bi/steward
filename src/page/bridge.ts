@@ -1,13 +1,22 @@
 /**
- * MAIN-world content script. Its only job is to hand the page's own globals to
- * the isolated world — it never makes requests and never touches the DOM.
+ * MAIN-world content script. Its only job is to hand the page's own globals
+ * and the inventory tiles currently on screen to the isolated world — it never
+ * makes requests and never mutates the DOM.
  *
  * What it sends is a projection, never the raw globals: `postMessage`
  * structure-clones its argument, and Steam's inventory objects carry DOM
  * references that cannot be cloned. See `project.ts`.
  */
 
-import { projectAppContexts, projectAssets, projectWallet, safePost } from "./project";
+import {
+  projectAppContexts,
+  projectAssets,
+  projectListingInfo,
+  projectVisibleInventory,
+  projectWallet,
+  safePost,
+} from "./project";
+import { projectSsr } from "./ssr";
 
 declare global {
   interface Window {
@@ -18,6 +27,9 @@ declare global {
     g_strCountryCode?: string;
     g_rgAssets?: unknown;
     g_rgAppContextData?: unknown;
+    g_rgListingInfo?: unknown;
+    /** The rewritten item page's own initial state. Absent on classic pages. */
+    SSR?: unknown;
   }
 }
 
@@ -33,6 +45,9 @@ function snapshot(): Record<string, unknown> {
     country: window.g_strCountryCode ?? null,
     assets: projectAssets(window.g_rgAssets),
     appContexts: projectAppContexts(window.g_rgAppContextData),
+    listingInfo: projectListingInfo(window.g_rgListingInfo),
+    itemPage: projectSsr(window),
+    visibleItems: projectVisibleInventory(document),
   };
 }
 
@@ -46,7 +61,13 @@ send();
 let ticks = 0;
 const timer = setInterval(() => {
   ticks += 1;
-  if ((window.g_rgWalletInfo || window.g_rgAppContextData) && window.g_sessionID) {
+  /**
+   * `window.SSR` on its own is enough. The rewritten item page defines none of
+   * the classic globals — no `g_sessionID`, no `g_rgWalletInfo` — so requiring
+   * one meant this poll never settled there and never sent its second snapshot.
+   * A page that finished hydrating after document_idle was simply missed.
+   */
+  if (window.SSR || ((window.g_rgWalletInfo || window.g_rgAppContextData) && window.g_sessionID)) {
     send();
     clearInterval(timer);
     return;

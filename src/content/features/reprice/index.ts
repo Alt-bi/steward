@@ -1,19 +1,40 @@
+import { levelLabel, PRICE_LEVELS, type PriceLevel } from "../../../core/levels";
 import { send } from "../../../core/messaging";
+import { loadFlag, loadPref, savePref } from "../../../core/prefs";
 import { formatCents } from "../../../core/money";
+import { noneDropped, pickAll, pickNone, togglePick, type Picks } from "../../../core/picks";
 import { loadSettings, type Settings } from "../../../core/settings";
 import type { Cents, ItemKeyed, Listing, RepricePlan } from "../../../core/types";
 import { needsConfirmation, removeListing, sellItem } from "../../../steam/actions";
-import { fetchCompetitorLow } from "../../../steam/listings";
-import { loadMyListings } from "../../../steam/mylistings";
-import { sleep, SteamError, type WaitReason } from "../../../steam/net";
-import { currencyId, feeConfig, sessionId, waitForPage } from "../../../steam/page-context";
-import { fetchMarketLows } from "../../../steam/prices";
+import { scanCompetitors } from "../../../steam/listings";
+import { forgetGroup, knownGroup } from "../../../steam/grouping";
+import { applyAssetRefs, fetchMyListings, listingsOnPage } from "../../../steam/mylistings";
+import { allowSteamTraffic, sleep, SteamError, type WaitReason } from "../../../steam/net";
+import { currencyId, feeConfig, refreshPage, sessionId, waitForPage } from "../../../steam/page-context";
+import { resolveHistories, unknownHistories } from "../../../steam/histories";
+import { fetchMarketLows, priceCacheKey } from "../../../steam/prices";
+import type { HistoryStats } from "../../../steam/pricehistory";
 import { el, type StatusKind } from "../../ui/panel";
+import { describeError, describeRelistFailure, type WriteStage } from "../../ui/errors";
 import { register, type FeatureContext } from "../registry";
 import {
+  cancellablePlans,
+  DEFAULT_LISTING_FILTERS,
+  isMovable,
+  listingTotals,
+  movablePlans,
+  shownIds,
+  viewPlans,
+  type ListingFilters,
+  type ListingSortKey,
+} from "./view";
+import {
   buildPlans,
+  BookLiveness,
   competitorFromMarketLow,
+  competitorFromScan,
   groupListings,
+  needsExactCheck,
   type CompetitorLow,
   type ItemGroup,
 } from "./plan";
@@ -21,30 +42,85 @@ import {
 /** Listing pages opened in parallel when the market minimum turned out to be ours. */
 const EXACT_CONCURRENCY = 2;
 
+/**
+ * Whether the listing book is answering at all.
+ *
+ * Module-level so the answer outlives one run — but a *judgment*, not a
+ * verdict: one markup page is weather, two in a row is a pattern, and the
+ * next scan re-asks from zero. See `BookLiveness` in plan.ts for what this
+ * codebase got wrong by making the old flag permanent.
+ */
+const bookLiveness = new BookLiveness();
+
+/**
+ * Apps whose items Steam will not answer to by market_hash_name.
+ *
+ * Counter-Strike moved every item onto a group id — a skin, and a plain case
+ * too — and the book asked for by hash there comes back empty rather than
+ * refused. Our own lot is in that book by definition, so an empty one for an
+ * item we are selling is proof about the name, not about the market.
+ *
+ * Module-level for the same reason as the flag above: it is a fact about the
+ * app, and paying one request per item to rediscover it on every scan is exactly
+ * the budget the prices needed.
+ */
+const unnamedApps = new Set<number>();
+
+/** `pricehistory` runs about this many a minute, so a run can be quoted in advance. */
+const HISTORY_PER_MIN = 6;
+
+/** Above this many unknown histories the run is confirmed with its cost first. */
+const ASK_ABOVE = 12;
+
 interface State {
   busy: boolean;
   abort: boolean;
   settings: Settings;
   listings: Listing[];
   groups: Map<string, ItemGroup>;
+  /** Every listing id we know to be ours — the page's rows plus what Steam listed. */
+  ourIds: Set<string>;
+  /** Steam named all of our listings, so an id outside `ourIds` is somebody else's. */
+  ownershipComplete: boolean;
   /** Everything we have learned so far, kept across a continue. */
   marketLows: Record<string, Cents | null>;
   lows: Map<string, CompetitorLow>;
   /** Items Steam stopped us before pricing. */
   unresolved: ItemKeyed[];
   plans: RepricePlan[];
+  /** What we are aiming at: the cheapest competitor, or a historical average. */
+  level: PriceLevel;
+  /** Group key -> what that item has been selling for. Empty until asked for. */
+  stats: Record<string, HistoryStats | null>;
+  /** Listings the user unticked. Everything scanned starts ticked. */
+  dropped: Picks;
+  filters: ListingFilters;
+  sort: ListingSortKey;
 }
 
 function money(cents: Cents | null | undefined): string {
   return formatCents(cents, currencyId());
 }
 
-function planRow(plan: RepricePlan): HTMLElement {
+interface RowHooks {
+  picked: boolean;
+  onToggle: () => void;
+}
+
+function planRow(plan: RepricePlan, hooks: RowHooks): HTMLElement {
   const row = el("div", "stw-row");
   row.dataset.id = plan.listingId;
-  row.dataset.kind = plan.result ?? plan.action;
+  row.dataset.kind = plan.result ?? (plan.unverified ? "unsure" : plan.action);
 
-  const name = el("div", "stw-name", plan.name);
+  const name = el("label", "stw-name");
+  const check = document.createElement("input");
+  check.type = "checkbox";
+  check.className = "stw-check";
+  check.checked = hooks.picked;
+  /** A listing already handled this run is history, not a choice. */
+  check.disabled = plan.result === "ok";
+  check.addEventListener("change", hooks.onToggle);
+  name.append(check, document.createTextNode(` ${plan.name}`));
   name.title = plan.hash;
 
   const prices = el("div", "stw-prices");
@@ -55,28 +131,35 @@ function planRow(plan: RepricePlan): HTMLElement {
       ? el("span", "stw-tgt", money(plan.targetBuyer))
       : el("span", "stw-tgt stw-muted", money(plan.competitorBuyer))
   );
+  prices.title = plan.ourSeller
+    ? `покупатель платит ${money(plan.ourBuyer)}, тебе ${money(plan.ourSeller)}`
+    : `покупатель платит ${money(plan.ourBuyer)}`;
 
-  row.append(name, prices, el("div", "stw-why", plan.resultMessage ?? plan.reason));
+  const why = el("div", "stw-why", plan.resultMessage ?? plan.reason);
+  if (plan.ourSeller > 0 && plan.action === "reprice") {
+    why.textContent = `${plan.resultMessage ?? plan.reason} · тебе сейчас ${money(plan.ourSeller)}`;
+  }
+
+  row.append(name, prices, why);
   return row;
 }
 
-function describeError(err: unknown): string {
-  if (err instanceof SteamError) {
-    switch (err.kind) {
-      case "not_logged_in":
-        return "нужен логин Steam в этой вкладке";
-      case "rate_limited":
-      case "blocked":
-        return "Steam упёрся в лимит";
-      case "not_json":
-        return "Steam ответил страницей вместо JSON";
-      case "aborted":
-        return "остановлено";
-      default:
-        return err.message;
+/** The failure message that came back most often, for the summary line. */
+function commonFailure(plans: RepricePlan[]): string | null {
+  const tally = new Map<string, number>();
+  for (const plan of plans) {
+    if (plan.result !== "fail" || !plan.resultMessage) continue;
+    tally.set(plan.resultMessage, (tally.get(plan.resultMessage) ?? 0) + 1);
+  }
+  let best: string | null = null;
+  let bestCount = 0;
+  for (const [message, count] of tally) {
+    if (count > bestCount) {
+      best = message;
+      bestCount = count;
     }
   }
-  return err instanceof Error ? err.message : String(err);
+  return best;
 }
 
 async function mount(ctx: FeatureContext): Promise<void> {
@@ -88,37 +171,111 @@ async function mount(ctx: FeatureContext): Promise<void> {
     settings: ctx.settings,
     listings: [],
     groups: new Map(),
+    ourIds: new Set(),
+    ownershipComplete: false,
     marketLows: {},
     lows: new Map(),
     unresolved: [],
     plans: [],
+    level: "market",
+    stats: {},
+    dropped: noneDropped(),
+    filters: { ...DEFAULT_LISTING_FILTERS },
+    sort: "drop",
   };
 
   const stats = el("div", "stw-stats");
   const statNodes: Record<string, HTMLElement> = {};
+  const statLabels: Record<string, HTMLElement> = {};
   for (const [key, label, tone] of [
     ["total", "лотов", ""],
     ["over", "оверпрайс", "warn"],
+    ["unsure", "не проверено", "warn"],
     ["skip", "пропуск", ""],
   ] as const) {
     const box = el("div", "stw-stat");
     if (tone) box.dataset.tone = tone;
     const n = el("div", "stw-stat-n", "0");
-    box.append(n, el("div", "stw-stat-l", label));
+    const l = el("div", "stw-stat-l", label);
+    box.append(n, l);
     statNodes[key] = n;
+    statLabels[key] = l;
     stats.appendChild(box);
   }
 
+  const filterRow = el("div", "stw-controls");
+  const queryInput = document.createElement("input");
+  queryInput.type = "search";
+  queryInput.className = "stw-input";
+  queryInput.placeholder = "поиск по названию";
+  queryInput.title = "Ищет и по названию, и по market_hash_name — там живёт износ";
+
+  const sortSelect = document.createElement("select");
+  sortSelect.className = "stw-select";
+  for (const [value, label] of [
+    ["drop", "сильнее двигаем"],
+    ["price", "дороже лот"],
+    ["name", "по названию"],
+  ] as const) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    sortSelect.appendChild(option);
+  }
+  filterRow.append(queryInput, sortSelect);
+
+  const levelRow = el("div", "stw-controls");
+  const levelSelect = document.createElement("select");
+  levelSelect.className = "stw-select";
+  levelSelect.title =
+    "Куда ставить цену. «Минимум рынка» подрезает чужой лот; средние — это цена, " +
+    "по которой предмет реально продавался, и лот может уехать вверх.";
+  for (const level of PRICE_LEVELS) {
+    const option = document.createElement("option");
+    option.value = level;
+    option.textContent = levelLabel(level);
+    levelSelect.appendChild(option);
+  }
+  const historyBtn = el("button", "stw-btn stw-btn-thin", "История продаж");
+  historyBtn.type = "button";
+  historyBtn.title =
+    "Спрашивает у Steam, по каким ценам предмет продавался. Самый медленный запрос — " +
+    "около 6 в минуту — но ответ живёт часами.";
+  levelRow.append(levelSelect, historyBtn);
+
+  const movableLabel = el("label", "stw-toggle");
+  movableLabel.title = "Оставить только те лоты, которые план собирается переставить";
+  const movableOnly = document.createElement("input");
+  movableOnly.type = "checkbox";
+  movableOnly.className = "stw-check";
+  movableLabel.append(movableOnly, document.createTextNode(" только оверпрайс"));
+
+  const pickAllBtn = el("button", "stw-btn stw-btn-thin", "Все");
+  pickAllBtn.type = "button";
+  pickAllBtn.title = "Отметить всё, что сейчас показано";
+  const pickNoneBtn = el("button", "stw-btn stw-btn-thin", "Ничего");
+  pickNoneBtn.type = "button";
+  pickNoneBtn.title = "Снять отметку со всего, что сейчас показано";
+
+  const toggleRow = el("div", "stw-controls stw-toggles");
+  toggleRow.append(movableLabel, pickAllBtn, pickNoneBtn);
+
+  const shownLine = el("div", "stw-hint", "");
+
   const actions = el("div", "stw-actions");
-  const scanBtn = el("button", "stw-btn stw-btn-primary", "Сканировать");
+  const scanBtn = el("button", "stw-btn stw-btn-primary", "Сканировать страницу");
   scanBtn.type = "button";
   const applyBtn = el("button", "stw-btn stw-btn-go", "Переставить");
   applyBtn.type = "button";
   applyBtn.disabled = true;
+  const cancelBtn = el("button", "stw-btn stw-btn-danger", "Снять");
+  cancelBtn.type = "button";
+  cancelBtn.title = "Снять отмеченные лоты с продажи — предметы вернутся в инвентарь";
+  cancelBtn.disabled = true;
   const stopBtn = el("button", "stw-btn", "Стоп");
   stopBtn.type = "button";
   stopBtn.disabled = true;
-  actions.append(scanBtn, applyBtn, stopBtn);
+  actions.append(scanBtn, applyBtn, cancelBtn, stopBtn);
 
   /** Only appears when a run stopped with items left, so it never adds noise. */
   const resumeRow = el("div", "stw-actions stw-resume");
@@ -128,7 +285,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   resumeRow.hidden = true;
 
   const rows = el("div", "stw-rows");
-  section.body.append(stats, actions, resumeRow, rows);
+  section.body.append(stats, filterRow, levelRow, toggleRow, shownLine, actions, resumeRow, rows);
 
   /**
    * The pause is an annotation on whatever we are doing, not a replacement for it.
@@ -166,32 +323,97 @@ async function mount(ctx: FeatureContext): Promise<void> {
     },
   };
 
+  /** How long Steam wants us to wait, in words, when it has told us. */
+  async function cooldownNote(): Promise<string> {
+    try {
+      const stats = await send("net/stats", {});
+      const secs = Math.ceil(stats.cooldownMsLeft / 1000);
+      if (secs > 0) {
+        return secs > 90
+          ? `Пауза ${Math.ceil(secs / 60)} мин.`
+          : `Пауза ${secs} с.`;
+      }
+    } catch {
+      /* no worker, no number — the advice still stands */
+    }
+    return "Подожди, пока маркет в этой вкладке начнёт открываться сам.";
+  }
+
+  /** Rebuilds the plan from what we already know. Never sends a request. */
+  function replan(): void {
+    state.plans = buildPlans(state.groups, state.lows, state.settings, feeConfig(), {
+      level: state.level,
+      stats: state.stats,
+    });
+    renderRows();
+    renderStats();
+  }
+
+  /** The rows on screen: the filter and the sort decide, nothing else. */
+  function currentViews(): RepricePlan[] {
+    return viewPlans(state.plans, state.filters, state.sort);
+  }
+
+  /** Overpriced, still live, still ticked — exactly what «Переставить» will move. */
   function pendingReprices(): RepricePlan[] {
-    return state.plans.filter((p) => p.action === "reprice" && p.result !== "ok");
+    return movablePlans(state.plans, state.dropped);
   }
 
   function renderStats(): void {
-    const over = state.plans.filter((p) => p.action === "reprice").length;
+    const over = state.plans.filter(isMovable).length;
+    /** Split out of «пропуск»: a lot nobody looked at is not a lot that is fine. */
+    const unsure = state.plans.filter((plan) => plan.unverified).length;
     statNodes.total!.textContent = String(state.listings.length);
     statNodes.over!.textContent = String(over);
-    statNodes.skip!.textContent = String(state.plans.length - over);
+    statNodes.unsure!.textContent = String(unsure);
+    statNodes.skip!.textContent = String(Math.max(0, state.plans.length - over - unsure));
+
+    /** «Overpriced» is only the word for it when we are chasing the competitor. */
+    statLabels.over!.textContent = state.level === "market" ? "оверпрайс" : "к переносу";
+
     const todo = pendingReprices().length;
     applyBtn.textContent = todo ? `Переставить ${todo}` : "Переставить";
     applyBtn.disabled = state.busy || todo === 0;
+
+    const views = currentViews();
+    const totals = listingTotals(views, state.dropped);
+    cancelBtn.textContent = totals.picked ? `Снять ${totals.picked}` : "Снять";
+    cancelBtn.disabled = state.busy || totals.picked === 0;
+
+    shownLine.textContent = state.plans.length
+      ? `Показано ${totals.shown} из ${state.plans.length} · отмечено ${totals.picked} · на витрине ${money(totals.value)}`
+      : "";
+  }
+
+  function rowFor(plan: RepricePlan): HTMLElement {
+    return planRow(plan, {
+      picked: !state.dropped.has(plan.listingId),
+      onToggle: () => {
+        togglePick(plan.listingId, state.dropped);
+        renderStats();
+      },
+    });
   }
 
   function renderRows(): void {
     rows.replaceChildren();
     if (!state.plans.length) {
-      rows.appendChild(el("div", "stw-empty", "Нажми «Сканировать» — сверю лоты с минимумом рынка."));
+      rows.appendChild(
+        el("div", "stw-empty", "Сверю лоты, которые Steam уже нарисовал на этой странице. Перелистни My listings и сканируй снова, чтобы взять следующие.")
+      );
       return;
     }
-    for (const plan of state.plans) rows.appendChild(planRow(plan));
+    const views = currentViews();
+    if (!views.length) {
+      rows.appendChild(el("div", "stw-empty", "Под фильтр ничего не попало."));
+      return;
+    }
+    for (const plan of views) rows.appendChild(rowFor(plan));
   }
 
   function patchRow(plan: RepricePlan): void {
     const node = rows.querySelector(`.stw-row[data-id="${plan.listingId}"]`);
-    node?.replaceWith(planRow(plan));
+    node?.replaceWith(rowFor(plan));
   }
 
   function setBusy(busy: boolean): void {
@@ -199,14 +421,40 @@ async function mount(ctx: FeatureContext): Promise<void> {
     scanBtn.disabled = busy;
     resumeBtn.disabled = busy;
     stopBtn.disabled = !busy;
-    applyBtn.disabled = busy || pendingReprices().length === 0;
+    renderStats();
   }
 
-  /** Opens listing pages only for items whose market minimum turned out to be ours. */
-  async function resolveExactLows(unsettled: ItemGroup[]): Promise<"blocked" | "aborted" | null> {
+  /**
+   * Reads the listing book for the items the cheap passes could not settle.
+   *
+   * One request each, and it answers everything at once: the market minimum, the
+   * cheapest lot that is not ours, and whether anybody is down there with us. That
+   * is why the scan no longer buys a `priceoverview` hint first — the hint cost the
+   * same single request and could not tell «we hold the minimum» from «Steam is
+   * quoting us an hour-old minimum that used to be ours».
+   */
+  /**
+   * Why the exact-competitor pass stopped early. `gone` is not a refusal: it is
+   * Steam answering with a page instead of the listing book, which no amount of
+   * waiting fixes.
+   */
+  type ExactStop = "blocked" | "aborted" | "gone" | null;
+
+  async function resolveExactLows(
+    unsettled: ItemGroup[]
+  ): Promise<{ stop: ExactStop; requests: number; unnamed: number[] }> {
+    /** Learned once already; asking again would only spend the budget to confirm. */
+    if (bookLiveness.dead) return { stop: "gone", requests: 0, unnamed: [] };
+
+    const ttlMs = state.settings.priceTtlMinutes * 60_000;
+    /** The book hands us a fresher market minimum than priceoverview would have. */
+    const fresh: { key: string; cents: number; ttlMs: number }[] = [];
     let next = 0;
     let done = 0;
-    let stop: "blocked" | "aborted" | null = null;
+    let requests = 0;
+    let stop: ExactStop = null;
+    /** Apps this run ran into the naming wall on, for the summary line. */
+    const hitUnnamed = new Set<number>();
 
     async function worker(): Promise<void> {
       for (;;) {
@@ -217,9 +465,43 @@ async function mount(ctx: FeatureContext): Promise<void> {
         }
         const group = unsettled[next++];
         if (!group) return;
+        /** A learned internal name, when Steam stopped answering this hash directly. */
+        const known = await knownGroup(group.appid, group.hash);
+        /** Already proven unanswerable for this app; the request would come back empty. */
+        if (unnamedApps.has(group.appid) && !known) {
+          hitUnnamed.add(group.appid);
+          continue;
+        }
         try {
-          const buyer = await fetchCompetitorLow(group.appid, group.hash, group.ourListingIds, pacing);
-          if (buyer != null) state.lows.set(group.key, { buyer, source: "listings" });
+          requests += 1;
+          const scan = await scanCompetitors(
+            group.appid,
+            group.hash,
+            state.ourIds,
+            pacing,
+            group.ourListingIds.size,
+            known ?? undefined
+          );
+          if (scan.unnamed) {
+            /**
+             * The name Steam no longer answers to. When we carried a learned
+             * group id, it went stale — forget it so the item is not skipped
+             * on the strength of a fact that stopped working.
+             */
+            if (known) forgetGroup(group.hash);
+            unnamedApps.add(group.appid);
+            hitUnnamed.add(group.appid);
+          }
+          /**
+           * The book spoke — even to say it holds nothing for this name — so the
+           * endpoint is alive and every markup page before it was noise.
+           */
+          bookLiveness.sawAnswer();
+          state.lows.set(group.key, competitorFromScan(scan, state.ownershipComplete));
+          if (scan.marketLow != null) {
+            state.marketLows[group.key] = scan.marketLow;
+            fresh.push({ key: priceCacheKey(group), cents: scan.marketLow, ttlMs });
+          }
         } catch (err) {
           if (err instanceof SteamError && err.kind === "blocked") {
             stop = "blocked";
@@ -230,27 +512,86 @@ async function mount(ctx: FeatureContext): Promise<void> {
             return;
           }
           if (err instanceof SteamError && err.kind === "not_logged_in") throw err;
+          if (err instanceof SteamError && err.kind === "not_json") {
+            /**
+             * Markup where JSON belongs. One of these is weather — a proxy
+             * interstitial, a sorry-page in a shape the classifier missed. Only a
+             * second one with nothing answered in between is a pattern, and only
+             * the pattern stops the run; the items after a lone markup page get
+             * their own request instead of inheriting its verdict. The page's own
+             * title travels with the verdict — «web page instead of JSON» names a
+             * symptom, the title names the cause, and only the cause tells the
+             * user whether to wait, log in again, or solve a captcha.
+             */
+            bookLiveness.sawMarkup(err.note);
+            if (bookLiveness.dead) {
+              stop = "gone";
+              return;
+            }
+            continue;
+          }
         }
         done += 1;
-        status(`Проверяю конкурентов ${done}/${unsettled.length} · ${group.name}`, "work");
+        status(`Смотрю чужие лоты ${done}/${unsettled.length} · ${group.name}`, "work");
       }
     }
 
     const size = Math.max(1, Math.min(EXACT_CONCURRENCY, unsettled.length));
-    await Promise.all(Array.from({ length: size }, () => worker()));
-    return stop;
+    try {
+      await Promise.all(Array.from({ length: size }, () => worker()));
+    } finally {
+      if (fresh.length) {
+        await send("cache/set", { entries: fresh }).catch(() => undefined);
+      }
+    }
+    return { stop, requests, unnamed: [...hitUnnamed] };
+  }
+
+  /**
+   * Items whose verdict nobody has actually checked against the market.
+   *
+   * Dearest first, because a run that Steam cuts short should have settled the
+   * listings worth money rather than whichever ones the page happened to draw
+   * first.
+   */
+  function unsettledGroups(): ItemGroup[] {
+    return [...state.groups.values()]
+      .filter((g) => needsExactCheck(state.lows.get(g.key)))
+      .sort(
+        (a, b) =>
+          Math.max(...b.listings.map((l) => l.ourBuyer), 0) -
+          Math.max(...a.listings.map((l) => l.ourBuyer), 0)
+      );
   }
 
   /**
    * Prices the given items, folds the answers into what we already knew, and
    * replans. Used by both the initial scan and the continue button.
+   *
+   * Our own prices never appear here: they came off the page, for free. The only
+   * thing worth a request is what somebody else is asking.
    */
   async function priceAndPlan(toFetch: ItemKeyed[]): Promise<void> {
+    const exact = state.settings.exactCompetitorLow;
+    /**
+     * In exact mode nothing but the cache runs before the listing book.
+     *
+     * The book always answers: one request, one item settled. `search` only
+     * *sometimes* answers — it settles an item when a competitor happens to sit
+     * below us, and returns nothing when it cannot match the name. Spending a
+     * scarce IP budget on the optional pass first is backwards, and it showed:
+     * five search requests, zero items settled, and Steam cut the scan off before
+     * the book pass ever ran. The request that always answers goes first.
+     */
+    const cacheOnly = exact;
+
     const result = await fetchMarketLows(toFetch, {
       ...pacing,
       concurrency: state.settings.scanConcurrency,
       source: state.settings.priceSource,
       ttlMs: state.settings.priceTtlMinutes * 60_000,
+      cacheOnly,
+      fallbackToOverview: !exact,
       onProgress: (done, total, label) => status(`Цены ${done}/${total} · ${label}`, "work"),
     });
 
@@ -259,76 +600,146 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
     for (const group of state.groups.values()) {
       const known = state.lows.get(group.key);
-      /** An exact answer from a listing page outranks anything priceoverview said. */
-      if (known?.source === "listings") continue;
+      /** An answer read off the listing book outranks anything inferred from a low. */
+      if (known && !needsExactCheck(known)) continue;
       state.lows.set(group.key, competitorFromMarketLow(group, state.marketLows[group.key] ?? null));
     }
 
-    let exactStop: "blocked" | "aborted" | null = null;
-    if (state.settings.exactCompetitorLow && !result.stopped) {
-      const unsettled = [...state.groups.values()].filter(
-        (g) => state.lows.get(g.key)?.source === "ours"
-      );
+    let exactStop: ExactStop = null;
+    let exactRequests = 0;
+    let unnamedAppIds: number[] = [];
+    if (exact && !result.stopped) {
+      /** Both «the minimum looks like ours» and «no price at all» are unchecked. */
+      const unsettled = unsettledGroups();
       if (unsettled.length) {
-        status(`Проверяю конкурентов по ${unsettled.length} предметам…`, "work");
-        exactStop = await resolveExactLows(unsettled);
+        status(`Читаю чужие лоты по ${unsettled.length} предметам…`, "work");
+        const book = await resolveExactLows(unsettled);
+        exactStop = book.stop;
+        exactRequests = book.requests;
+        unnamedAppIds = book.unnamed;
       }
     }
 
-    state.plans = buildPlans(state.groups, state.lows, state.settings, feeConfig());
-    renderRows();
-    renderStats();
+    /** «Догрузить» is about what is still unknown, and the book may have answered it. */
+    const stillOpen = new Set(unsettledGroups().map((g) => g.key));
+    state.unresolved = state.unresolved.filter((item) => stillOpen.has(item.key));
+
+    replan();
 
     const stopped = result.stopped ?? exactStop;
     const todo = pendingReprices().length;
-    const priced = Object.values(state.marketLows).filter((v) => v != null).length;
     const totalItems = state.groups.size;
+    const unsure = stillOpen.size;
+    const checked = totalItems - unsure;
 
     resumeRow.hidden = state.unresolved.length === 0;
     resumeBtn.textContent = `Догрузить цены (${state.unresolved.length})`;
 
     const cached = result.fromCache ? `, из кэша ${result.fromCache}` : "";
-    const spent = `Запросов ${result.requests}${cached}.`;
+    /** The listing book is most of the bill now; leaving it out would flatter us. */
+    const spent = `Запросов ${result.requests + exactRequests}${cached}.`;
 
     if (stopped === "blocked") {
+      /** «Wait» is only advice if it says how long. The scheduler knows. */
+      const pause = await cooldownNote();
       status(
-        `Steam притормозил на ${priced} из ${totalItems} предметов. ` +
-          `Что успели — посчитано${todo ? `, оверпрайс: ${todo}` : ""}. ` +
-          `Остальное — «Догрузить цены» через минуту. ${spent}`,
+        `Steam отказал: проверено ${checked} из ${totalItems} предметов. ` +
+          `Что успели — посчитано${todo ? `, к переносу: ${todo}` : ""}. ` +
+          `${pause} Повторные запросы во время отказа только удлиняют его. ${spent}`,
+        "warn"
+      );
+      return;
+    }
+    if (stopped === "gone") {
+      /**
+       * Deliberately not «Steam отказал» and no longer «больше не отдаёт»: nothing
+       * died — Steam answered twice with a web page where JSON belongs. The page
+       * usually carries its own title, and that title is the diagnosis: a
+       * marketsorry means wait, «Sign in» means the session is the problem, a
+       * robot check means a human has to click. Without it we are guessing.
+       */
+      const seen = bookLiveness.lastMarkup ? ` Пришлась страница: «${bookLiveness.lastMarkup}».` : "";
+      status(
+        `Steam дважды прислал веб-страницу вместо данных книги лотов — точную проверку конкурентов на этом не делаю. ` +
+          `Посчитано по рыночному минимуму: ${checked} из ${totalItems}` +
+          `${todo ? `, к переносу: ${todo}` : ""}. ${seen}${spent}`,
         "warn"
       );
       return;
     }
     if (stopped === "aborted") {
-      status(`Остановлено на ${priced} из ${totalItems}. ${spent}`, "");
+      status(`Остановлено: проверено ${checked} из ${totalItems}. ${spent}`, "");
       return;
     }
 
+    /**
+     * «Оверпрайса нет» is only true when everything was actually looked at. Saying
+     * it over a pile of unchecked items is the bug this line used to have.
+     */
+    const aim =
+      state.level === "market"
+        ? "поставить ниже чужого минимума"
+        : `перенести на уровень «${levelLabel(state.level)}»`;
+    const verdict = todo
+      ? `${todo} лот(ов) можно ${aim}.`
+      : unsure
+        ? "Среди проверенных двигать нечего."
+        : "Проверил все лоты: двигать нечего.";
+    const gap = unsure ? ` Не проверено ${unsure} из ${totalItems} — конкурента там не видел.` : "";
+    const ours = state.ownershipComplete
+      ? ""
+      : " Свои лоты знаю не полностью, поэтому на равной цене ничего не двигаю.";
+    /** A level target is useless without histories, and the scan does not fetch them. */
+    const noHistory =
+      state.level === "market"
+        ? 0
+        : [...state.groups.values()].filter((g) => state.stats[g.key] == null).length;
+    const history = noHistory
+      ? ` Для уровня «${levelLabel(state.level)}» не хватает истории у ${noHistory} предм. — нажми «История продаж».`
+      : "";
+    /**
+     * Named outright rather than folded into «не проверено»: nothing is wrong with
+     * the connection, the budget or the account, and no amount of waiting or
+     * rescanning will settle these — so saying so is the only useful answer.
+     */
+    const naming = unnamedAppIds.length
+      ? ` Steam не отдаёт книгу лотов по названию предмета для прил. ${unnamedAppIds.join(", ")} — ` +
+        "там каждый предмет живёт под id группы. Такие лоты считаны по рыночному минимуму. " +
+        "Открой страницу такого предмета — Steward выучит id группы и точность вернётся."
+      : "";
+
     status(
-      (todo
-        ? `${todo} оверпрайс — можно поставить ниже чужого минимума.`
-        : "Оверпрайса нет, всё стоит по рынку.") +
-        ` Цены есть у ${priced} из ${totalItems}. ${spent}`,
-      todo ? "warn" : "ok"
+      `${verdict}${gap}${history}${naming}${ours} Перелистни My listings и сканируй снова, чтобы взять следующие. ${spent}`,
+      todo || unsure ? "warn" : "ok"
     );
   }
 
   async function scan(): Promise<void> {
     if (state.busy) return;
     state.abort = false;
+    /** Pressing the button again is asking the question again; the old verdict expires. */
+    bookLiveness.restart();
     state.listings = [];
     state.groups = new Map();
+    state.ourIds = new Set();
+    state.ownershipComplete = false;
     state.marketLows = {};
     state.lows = new Map();
     state.unresolved = [];
     state.plans = [];
+    /** Histories outlive a rescan: they are hours-fresh and cost the most. */
+    state.dropped = noneDropped();
     resumeRow.hidden = true;
     setBusy(true);
     renderRows();
     renderStats();
 
-    /** A previous run may have tripped the breaker; pressing Scan is the retry. */
-    await send("net/unblock", {}).catch(() => undefined);
+    const quiet = await allowSteamTraffic();
+    if (quiet) {
+      status(quiet, "warn");
+      setBusy(false);
+      return;
+    }
 
     state.settings = await loadSettings();
     await waitForPage();
@@ -340,17 +751,43 @@ async function mount(ctx: FeatureContext): Promise<void> {
     }
 
     try {
-      status("Читаю мои лоты…", "work");
-      const { listings, meta } = await loadMyListings({
-        ...pacing,
-        onProgress: (loaded, total) => status(`Лоты: ${loaded} / ${total}`, "work"),
-      });
+      status("Читаю лоты на странице…", "work");
+      await refreshPage();
+      const listings = listingsOnPage();
+      /**
+       * One request about ourselves, and only one. It does two jobs at once.
+       *
+       * Steam does not always put the asset reference on the row, and cancelling a
+       * listing we cannot re-list is the one unrecoverable mistake here. And it
+       * names the complete set of our own listing ids — without which a lot priced
+       * exactly like ours cannot be told from our own lot on the next page, and
+       * undercutting that would be bidding against ourselves.
+       */
+      const blind = listings.filter((listing) => !listing.assetid);
+      state.ourIds = new Set(listings.map((listing) => listing.listingId));
+      if (listings.length && (blind.length || state.settings.exactCompetitorLow)) {
+        status(
+          blind.length
+            ? `Лотов ${listings.length}, без ссылки на предмет ${blind.length} — дочитываю…`
+            : `Лотов ${listings.length} — уточняю, какие лоты мои…`,
+          "work"
+        );
+        try {
+          const mine = await fetchMyListings(listings.length, pacing);
+          applyAssetRefs(listings, mine.refs);
+          for (const id of mine.ids) state.ourIds.add(id);
+          state.ownershipComplete = mine.complete;
+        } catch (err) {
+          if (err instanceof SteamError && (err.kind === "aborted" || err.kind === "blocked")) throw err;
+        }
+      }
+
       state.listings = listings;
       renderStats();
 
       if (!listings.length) {
         status(
-          `Лоты не разобрались (Steam total=${meta.total}). Обнови расширение и перезагрузи маркет.`,
+          "На странице нет лотов. Открой Market → My listings и дождись, пока Steam нарисует строки — беру только их, без обхода всех страниц.",
           "err"
         );
         setBusy(false);
@@ -358,23 +795,13 @@ async function mount(ctx: FeatureContext): Promise<void> {
       }
 
       state.groups = groupListings(listings);
-      /**
-       * With hundreds of unique items a full pass takes many minutes, so the order
-       * matters: price the listings holding the most money first. If Steam cuts us
-       * off halfway, the half we got is the half worth acting on.
-       */
-      const uniques: ItemKeyed[] = [...state.groups.values()]
-        .map((g) => ({
-          key: g.key,
-          appid: g.appid,
-          hash: g.hash,
-          name: g.name,
-          worth: Math.max(...g.listings.map((l) => l.ourBuyer), 0),
-        }))
-        .sort((a, b) => b.worth - a.worth)
-        .map(({ worth: _worth, ...item }) => item);
+      const uniques = uniqueItems();
 
-      status(`Лотов ${listings.length}, уникальных ${uniques.length} — качаю минимумы…`, "work");
+      status(
+        `На странице ${listings.length} лотов, уникальных ${uniques.length}. ` +
+          "Свои цены взял со страницы — спрашиваю только чужие…",
+        "work"
+      );
       await priceAndPlan(uniques);
     } catch (err) {
       status(`Скан: ${describeError(err)}`, "err");
@@ -387,7 +814,12 @@ async function mount(ctx: FeatureContext): Promise<void> {
     if (state.busy || !state.unresolved.length) return;
     state.abort = false;
     setBusy(true);
-    await send("net/unblock", {}).catch(() => undefined);
+    const quiet = await allowSteamTraffic();
+    if (quiet) {
+      status(quiet, "warn");
+      setBusy(false);
+      return;
+    }
     state.settings = await loadSettings();
     try {
       status(`Догружаю ${state.unresolved.length} цен…`, "work");
@@ -399,13 +831,105 @@ async function mount(ctx: FeatureContext): Promise<void> {
     }
   }
 
+  /** Unique items on the page, most valuable first — the order a scan should die in. */
+  function uniqueItems(): ItemKeyed[] {
+    return [...state.groups.values()]
+      .map((g) => ({
+        key: g.key,
+        appid: g.appid,
+        hash: g.hash,
+        name: g.name,
+        worth: Math.max(...g.listings.map((l) => l.ourBuyer), 0),
+      }))
+      .sort((a, b) => b.worth - a.worth)
+      .map(({ worth: _worth, ...item }) => item);
+  }
+
+  /**
+   * Fetches what these items have been selling for.
+   *
+   * Separate from the scan and never automatic. This is the slowest endpoint
+   * Steam has, and the honest way to spend six requests a minute of somebody's IP
+   * budget is to say how many and how long, and then let them decide.
+   */
+  async function loadHistory(): Promise<void> {
+    if (state.busy) return;
+    if (!state.groups.size) {
+      status("Сначала «Сканировать страницу» — историю качаю только для лотов на ней.", "warn");
+      return;
+    }
+
+    const items = uniqueItems();
+    const missing = await unknownHistories(items);
+    if (!missing.length) {
+      state.stats = (await resolveHistories(items)).stats;
+      replan();
+      status(`История уже есть по всем ${items.length} предметам — запросов не было.`, "ok");
+      return;
+    }
+
+    if (missing.length > ASK_ABOVE) {
+      const minutes = Math.max(1, Math.ceil(missing.length / HISTORY_PER_MIN));
+      const ok = window.confirm(
+        `История продаж есть не для всех: не хватает ${missing.length} предм.\n\n` +
+          `Это ${missing.length} запрос(ов) к Steam, примерно ${minutes} мин. ` +
+          "Это самый медленный запрос — быстрее нельзя, иначе Steam выдаёт бан на часы.\n\n" +
+          "Ответы сохраняются на несколько часов, второй раз будет бесплатно. Качаем?"
+      );
+      if (!ok) return;
+    }
+
+    state.abort = false;
+    setBusy(true);
+    const quiet = await allowSteamTraffic();
+    if (quiet) {
+      status(quiet, "warn");
+      setBusy(false);
+      return;
+    }
+
+    try {
+      const result = await resolveHistories(items, {
+        ...pacing,
+        onProgress: (done, total, label) => status(`История ${done}/${total} · ${label}`, "work"),
+      });
+      Object.assign(state.stats, result.stats);
+      replan();
+
+      const known = Object.values(state.stats).filter((s) => s != null).length;
+      const spent = `Запросов ${result.requests}${result.fromCache ? `, из кэша ${result.fromCache}` : ""}.`;
+      if (result.stopped === "blocked") {
+        status(
+          `Steam отказал: история есть у ${known} из ${items.length}. ` +
+            `Не повторяй сразу — бан на pricehistory самый длинный. ${spent}`,
+          "warn"
+        );
+      } else if (result.stopped === "aborted") {
+        status(`Остановлено: история есть у ${known} из ${items.length}. ${spent}`, "");
+      } else {
+        status(
+          `История есть у ${known} из ${items.length}. Теперь можно выбрать уровень цены. ${spent}`,
+          "ok"
+        );
+      }
+    } catch (err) {
+      status(`История: ${describeError(err)}`, "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function apply(): Promise<void> {
     if (state.busy) return;
     const todo = pendingReprices();
     if (!todo.length) return;
 
+    const aim =
+      state.level === "market"
+        ? "ниже чужого минимума"
+        : `на уровень «${levelLabel(state.level)}»`;
     const confirmed = window.confirm(
-      `Снять ${todo.length} лот(ов) и выставить ниже чужого минимума?\n\n` +
+      `Снять ${todo.length} лот(ов) и выставить ${aim}?\n\n` +
         "После этого продажи надо подтвердить в Steam Guard."
     );
     if (!confirmed) return;
@@ -413,20 +937,27 @@ async function mount(ctx: FeatureContext): Promise<void> {
     state.abort = false;
     setBusy(true);
     state.settings = await loadSettings();
-    const delay = Math.max(900, state.settings.delayMs);
+    const delay = Math.max(1500, state.settings.delayMs);
 
     let ok = 0;
     let failed = 0;
     let guard = 0;
+    let halted = false;
+    /** The one lot, if any, left off the market with nothing put back. */
+    let stranded: RepricePlan | null = null;
 
     for (let i = 0; i < todo.length; i++) {
       if (state.abort) break;
       const plan = todo[i]!;
       status(`Переставляю ${i + 1}/${todo.length}: ${plan.name}`, "work");
 
+      /** Which part of the write we are in: the relist failing is not the same event. */
+      let stage: WriteStage = "before";
       try {
         if (!plan.assetid) throw new SteamError("http", "нет assetid — нельзя выставить снова");
+        stage = "removing";
         await removeListing(plan.listingId, pacing);
+        stage = "relisting";
         await sleep(delay);
         const result = await sellItem(plan, pacing);
         plan.result = "ok";
@@ -439,25 +970,169 @@ async function mount(ctx: FeatureContext): Promise<void> {
         ok += 1;
         await sleep(delay);
       } catch (err) {
+        const failure = describeRelistFailure(stage, err);
         plan.result = "fail";
-        plan.resultMessage = `ошибка: ${describeError(err)}`;
+        plan.resultMessage = failure.message;
         failed += 1;
-        if (err instanceof SteamError && (err.kind === "rate_limited" || err.kind === "blocked")) {
-          await sleep(8000);
-        }
+        if (failure.stranded) stranded = plan;
+        if (failure.halt) halted = true;
       }
 
       patchRow(plan);
       renderStats();
+      if (halted) break;
     }
 
-    const parts = [`Готово: ${ok} ок`];
-    if (failed) parts.push(`${failed} ошибок`);
-    if (guard) parts.push(`подтверди ${guard} в Steam Guard`);
-    if (state.abort) parts.push("остановлено");
-    status(parts.join(" · "), failed ? "warn" : "ok");
+    if (stranded) {
+      status(
+        `Остановился на «${stranded.name}»: ${stranded.resultMessage}. ` +
+          `Проверь этот лот на маркете и в инвентаре — переставлено до него ${ok} из ${todo.length}. ` +
+          "Дальше не иду: причина не выяснена, а каждый следующий шаг сначала снимает лот.",
+        "err"
+      );
+    } else if (halted) {
+      status(
+        `Steam остановил перестановку на ${ok} из ${todo.length}. Не продолжаю — бан от повторных запросов только удлиняется.`,
+        "warn"
+      );
+    } else {
+      const parts = [`Готово: ${ok} ок`];
+      if (failed) parts.push(`${failed} ошибок`);
+      if (guard) parts.push(`подтверди ${guard} в Steam Guard`);
+      if (state.abort) parts.push("остановлено");
+      /** A count of failures is not a diagnosis; name the one that happened most. */
+      const common = commonFailure(todo);
+      if (common) parts.push(`чаще всего: ${common}`);
+      status(parts.join(" · "), failed ? "warn" : "ok");
+    }
     setBusy(false);
   }
+
+  /**
+   * Takes the ticked listings off the market.
+   *
+   * Not part of repricing and deliberately separate from it: this one only
+   * cancels. The items come back to the inventory, so it is undoable in the sense
+   * that matters, but the queue position and the listed-on date are gone — which
+   * is why it asks first and names the money involved.
+   */
+  async function cancelPicked(): Promise<void> {
+    if (state.busy) return;
+    const todo = cancellablePlans(currentViews(), state.dropped);
+    if (!todo.length) return;
+
+    const worth = todo.reduce((sum, plan) => sum + plan.ourBuyer, 0);
+    const confirmed = window.confirm(
+      `Снять с продажи ${todo.length} лот(ов) на ${money(worth)}?\n\n` +
+        "Предметы вернутся в инвентарь. Место в очереди и дата выставления потеряются, " +
+        "выставлять заново придётся вручную или через «Инвентарь»."
+    );
+    if (!confirmed) return;
+
+    state.abort = false;
+    setBusy(true);
+    state.settings = await loadSettings();
+    const delay = Math.max(1500, state.settings.delayMs);
+
+    let ok = 0;
+    let failed = 0;
+    let halted = false;
+
+    for (let i = 0; i < todo.length; i++) {
+      if (state.abort) break;
+      const plan = todo[i]!;
+      status(`Снимаю ${i + 1}/${todo.length}: ${plan.name}`, "work");
+      try {
+        await removeListing(plan.listingId, pacing);
+        plan.result = "ok";
+        plan.resultMessage = "снят — предмет в инвентаре";
+        ok += 1;
+        await sleep(delay);
+      } catch (err) {
+        /** A cancel is one call, so it never strands a lot the way repricing can —
+         *  but a POST that never came back leaves the same open question, and the
+         *  rule about when to stop is the same rule. */
+        const failure = describeRelistFailure("removing", err);
+        plan.result = "fail";
+        plan.resultMessage = failure.message;
+        failed += 1;
+        if (failure.halt) halted = true;
+      }
+      patchRow(plan);
+      renderStats();
+      if (halted) break;
+    }
+
+    if (halted) {
+      status(
+        `Steam остановил снятие на ${ok} из ${todo.length}. Не продолжаю — бан от повторных запросов только удлиняется.`,
+        "warn"
+      );
+    } else {
+      const parts = [`Снято: ${ok}`];
+      if (failed) parts.push(`${failed} ошибок`);
+      if (state.abort) parts.push("остановлено");
+      const common = commonFailure(todo);
+      if (common) parts.push(`чаще всего: ${common}`);
+      status(parts.join(" · "), failed ? "warn" : "ok");
+    }
+    setBusy(false);
+  }
+
+  queryInput.addEventListener("input", () => {
+    state.filters.query = queryInput.value;
+    renderRows();
+    renderStats();
+  });
+
+  sortSelect.addEventListener("change", () => {
+    state.sort = sortSelect.value as ListingSortKey;
+    void savePref("reprice.sort", state.sort);
+    renderRows();
+  });
+
+  movableOnly.addEventListener("change", () => {
+    state.filters.onlyMovable = movableOnly.checked;
+    void savePref("reprice.onlyMovable", movableOnly.checked);
+    renderRows();
+    renderStats();
+  });
+
+  /** The bulk buttons act on what the filter shows — that is what filtering is for. */
+  pickAllBtn.addEventListener("click", () => {
+    pickAll(shownIds(currentViews()), state.dropped);
+    renderRows();
+    renderStats();
+  });
+
+  pickNoneBtn.addEventListener("click", () => {
+    pickNone(shownIds(currentViews()), state.dropped);
+    renderRows();
+    renderStats();
+  });
+
+  levelSelect.addEventListener("change", () => {
+    state.level = levelSelect.value as PriceLevel;
+    void savePref("reprice.level", state.level);
+    replan();
+    if (state.level === "market") {
+      status("Цель: подрезать самый дешёвый чужой лот.", "");
+      return;
+    }
+    const missing = state.groups.size
+      ? [...state.groups.values()].filter((g) => state.stats[g.key] == null).length
+      : 0;
+    status(
+      missing
+        ? `Цель: «${levelLabel(state.level)}». Истории нет у ${missing} предм. — нажми «История продаж».`
+        : `Цель: «${levelLabel(state.level)}». Лоты поедут к этой цене, в том числе вверх.`,
+      missing ? "warn" : ""
+    );
+  });
+
+  historyBtn.addEventListener("click", () => void loadHistory());
+
+  cancelBtn.addEventListener("click", () => void cancelPicked());
 
   scanBtn.addEventListener("click", () => void scan());
   resumeBtn.addEventListener("click", () => void resume());
@@ -467,7 +1142,27 @@ async function mount(ctx: FeatureContext): Promise<void> {
     status("Останавливаю…", "warn");
   });
 
-  status("Открой маркет, будучи в Steam, и нажми «Сканировать».");
+  /**
+   * Choices the user made last time. Restored before the first paint so the panel
+   * never flashes the default and then jumps — and never quietly plans against a
+   * level the dropdown is not showing.
+   */
+  state.level = await loadPref("reprice.level", PRICE_LEVELS, "market");
+  state.sort = await loadPref("reprice.sort", ["drop", "price", "name"] as const, "drop");
+  state.filters.onlyMovable = await loadFlag("reprice.onlyMovable", false);
+  levelSelect.value = state.level;
+  sortSelect.value = state.sort;
+  movableOnly.checked = state.filters.onlyMovable;
+
+  /** Esc stops a run. A long scan is the one thing a user wants to abort in a hurry. */
+  section.body.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !state.busy) return;
+    event.preventDefault();
+    state.abort = true;
+    status("Останавливаю…", "warn");
+  });
+
+  status("Открой Market → My listings и нажми «Сканировать страницу».");
   renderRows();
   renderStats();
 }

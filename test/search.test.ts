@@ -7,6 +7,7 @@ import type { ItemKeyed } from "../src/core/types";
 import {
   batchingRatio,
   groupForSearch,
+  groupIdsFromResults,
   pricesFromResults,
   queryForItem,
   searchUrl,
@@ -113,6 +114,40 @@ describe("queryForItem", () => {
       queryForItem({ hash: "★ StatTrak™ Karambit | Doppler (Factory New)", name: "" }),
       "Karambit | Doppler"
     );
+  });
+});
+
+describe("groupIdsFromResults", () => {
+  it("picks up the internal group id a skin row carries", () => {
+    const ids = groupIdsFromResults([
+      {
+        hash_name: "AK-47 | Redline (Field-Tested)",
+        sell_price: 12000,
+        asset_description: {
+          market_hash_name: "AK-47 | Redline (Field-Tested)",
+          market_bucket_group_id: "G1807209A023004",
+        },
+      },
+      { hash_name: "Chroma Case", sell_price: 300 },
+    ]);
+    assert.equal(ids.get("AK-47 | Redline (Field-Tested)"), "G1807209A023004");
+    assert.equal(ids.has("Chroma Case"), false, "a row without one teaches nothing");
+  });
+
+  it("does not confuse a row with itself", () => {
+    const ids = groupIdsFromResults([
+      {
+        hash_name: "Case",
+        sell_price: 300,
+        asset_description: { market_bucket_group_id: "Case" },
+      },
+    ]);
+    assert.equal(ids.size, 0, "an id equal to the hash is not a group");
+  });
+
+  it("answers nothing to a missing answer", () => {
+    assert.equal(groupIdsFromResults(null).size, 0);
+    assert.equal(groupIdsFromResults([]).size, 0);
   });
 });
 

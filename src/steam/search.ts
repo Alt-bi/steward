@@ -22,6 +22,10 @@ interface SearchResult {
   sell_listings?: number;
   sell_price?: number;
   sell_price_text?: string;
+  asset_description?: {
+    market_hash_name?: string;
+    market_bucket_group_id?: string;
+  };
 }
 
 interface SearchResponse {
@@ -30,6 +34,13 @@ interface SearchResponse {
   pagesize?: number;
   total_count?: number;
   results?: SearchResult[] | null;
+}
+
+/** What one search run yields: the prices it found and the group ids it teaches. */
+export interface GroupPrices {
+  prices: Map<string, Cents>;
+  /** Exact `hash_name` → internal group id, for the apps that stopped answering by hash. */
+  groupIds: Map<string, string>;
 }
 
 export interface SearchGroup {
@@ -114,6 +125,24 @@ export function pricesFromResults(results: SearchResult[] | null | undefined): M
   return out;
 }
 
+/**
+ * Group ids learned from search answers, keyed by the exact `hash_name`. Steam
+ * hands out `market_bucket_group_id` on skin rows whether we asked or not, and
+ * the listing book of appid 730 only answers to that name.
+ */
+export function groupIdsFromResults(
+  results: SearchResult[] | null | undefined
+): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!results) return out;
+  for (const row of results) {
+    const hash = row.hash_name;
+    const groupId = row.asset_description?.market_bucket_group_id;
+    if (hash && groupId && groupId !== hash) out.set(hash, groupId);
+  }
+  return out;
+}
+
 export function searchUrl(group: SearchGroup, count: number): string {
   return (
     "https://steamcommunity.com/market/search/render/" +
@@ -126,12 +155,12 @@ export function searchUrl(group: SearchGroup, count: number): string {
   );
 }
 
-/** Lowest buyer price per exact market_hash_name found for this query. */
+/** Lowest buyer price per exact market_hash_name, plus the group ids the rows teach. */
 export async function fetchGroupPrices(
   group: SearchGroup,
   pacing: Pacing,
   count = 100
-): Promise<Map<string, Cents>> {
+): Promise<GroupPrices> {
   const data = await fetchJson<SearchResponse>(searchUrl(group, count), {
     kind: "search",
     ...pacing,
@@ -140,5 +169,5 @@ export async function fetchGroupPrices(
       return r?.success === false;
     },
   });
-  return pricesFromResults(data.results);
+  return { prices: pricesFromResults(data.results), groupIds: groupIdsFromResults(data.results) };
 }

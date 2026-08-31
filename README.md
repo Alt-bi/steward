@@ -4,14 +4,17 @@ Open-source helper for [Steam Community Market](https://steamcommunity.com/marke
 
 Not SIH: no ads, no subscriptions, no telemetry. Every request goes to `steamcommunity.com`. Sources are here, unobfuscated.
 
-[Privacy](PRIVACY.md) · [License (MIT)](LICENSE)
+[Privacy](PRIVACY.md) · [Development log](DEVLOG.md) · [License (MIT)](LICENSE)
 
 ---
 
 ## What it does
 
-- **Reprice** — scans your active listings, finds the competitor minimum, and relists one tick below. Listings that already hold the floor are left alone.
-- **Inventory** — values what you own against the Steam market, totals it, paints prices on Steam's own tiles, and lists the selection: at the floor, under it, or with a markup. The game picker comes from the page (`g_rgAppContextData`); you do not wait for `#730_2` in the URL.
+- **Reprice** — scans the listings Steam has already painted on this page, finds the competitor minimum, and relists one tick below. Listings that already hold the floor are left alone. Search, sorting and per-row ticking work on the scanned page for free, and the ticked rows can be taken off the market in bulk instead of repriced. Page the Steam table and scan again for the next batch.
+- **Inventory** — values the items currently visible in Steam's grid, totals them, paints prices on those tiles, and lists the selection: at the floor, under it, or with a markup. It does not walk the whole backpack. Search, filters, sorting and bulk ticking work on what is already priced, so narrowing a page of two hundred stacks costs no requests; Ctrl+click on a tile picks or drops that single copy, and a single stack can be listed on its own. The game picker comes from the page (`g_rgAppContextData`).
+- **Buy orders** — on the market home page: every standing order, how much of the wallet each is holding, and — on request — how far each one sits from the current market minimum. Orders can be cancelled in bulk.
+- **Price levels** — anywhere a price is set, the target can be the cheapest competitor *or* what the item has actually been selling for: the volume-weighted average of the last week, month, or year. Pricing against the market walks it down a kopeck at a time; pricing against last month's average is how a listing moves **up** and waits. Available in the repricer, in the inventory's sell strategy, and shown as a ladder on the item page.
+- **Offers** — on the trade-offer list: every offer at once, what leaves and what arrives, which are held in escrow, which take items and give nothing back. On request it names the items and prices both sides, so the one offer worth opening can be found without opening thirty. It never accepts or declines anything.
 - **Trade** — on an offer page, prices both sides, shows the gap, and flags what is wrong: a lookalike swap, invisible characters, mixed alphabets in a name, unmarketable items, a lopsided value.
 - **Item** — on a listing: current lots, a sales-history chart, 30-day average and floor, a cheaper/dearer verdict, liquidity, and a one-click buy of the cheapest lot under a hard cap.
 
@@ -54,13 +57,19 @@ npm run check    # typecheck + tests + build
 
 1. `page-bridge.js` (MAIN world) hands the extension `g_sessionID`, `g_rgWalletInfo`, `g_rgAssets`, `g_rgAppContextData` — without that, `sellitem` cannot be built.
    It sends a **projection**, not the raw objects: `postMessage` structured-clones its argument, and Steam's inventory objects hold DOM references, so a raw `g_rgAppContextData` dies with `DataCloneError`. Only named fields are copied (`src/page/project.ts`), which also shrinks a large inventory by orders of magnitude. `postMessage` itself is wrapped: a clone failure must not escape into the page.
-2. `GET /market/mylistings` in pages of 100. Data is glued from three response fields (`listinginfo` + `results_html` + `hovers`), because each one is empty some of the time.
-3. Market floors are a cheap `priceoverview`, one request per unique item, cached for 2 minutes in the lookup path (the user-facing TTL is 15 minutes).
-4. **Who actually holds the floor.** `priceoverview.lowest_price` counts our own listings, so:
-   - a floor **below** our cheapest listing is someone else's, free of extra work;
-   - a floor **equal** to ours means we are in the floor, and only then does Steward open `market/listings/{appid}/{hash}/render`, where `listinginfo` keys are listing ids. We already know our ids from `mylistings`, so the first foreign id is the real competitor minimum.
+2. Active listings come from the DOM Steam already rendered (`#tabContentsMyListings` / the current My listings page) — the endpoint is never paged. The one thing the markup does not always carry is **which asset a listing holds**: the classic market writes it into `CreateItemHoverFromContainer(...)` on every row, other layouts do not. Without it a listing can be cancelled but not re-listed, so one `GET /market/mylistings` (this page only, no pagination) fills them in. That single request does a second job: it returns the **complete set of our own listing ids**, and `total_count` says whether it really was complete. Without that, a lot priced exactly like ours cannot be told from our own lot on the next page. A listing whose asset is still unknown is never planned — `removelisting` would succeed and `sellitem` could not. Inventory prices come from the visible grid (`rgItem` / `g_rgAssets`), not from fetching every unique hash in the backpack. That is how SIH stays inside Steam's IP budget.
+3. **Our own prices are never requested.** They are in the row markup Steam already painted (`market_listing_price_with_fee` / the Beta cell), so the only thing worth a request is what somebody *else* is asking.
+4. **Who actually holds the floor.** `priceoverview.lowest_price` counts our own listings, so a floor equal to ours settles nothing — and Steam caches that number for hours, so «equal to ours» is often yesterday's market. `market/listings/{appid}/{hash}/render` answers exactly, for the same one request: `listinginfo` is keyed by listing id, and we know our own ids. So with the exact floor on, the order is **cache → the listing book**, and nothing else runs. The book always answers: one request, one item settled. `search` only *sometimes* answers — it settles an item when a competitor happens to sit below us, and returns nothing when it cannot match the name — so spending a scarce IP budget on it first is backwards. The unsettled items are read dearest-first, because a run Steam cuts short should have settled the listings worth money.
+   - a floor **below** our cheapest listing is someone else's — the cheap pass settles it and no listing page is opened;
+   - anything else — a floor equal to ours, or no price at all — goes to the book. The window scales with how many lots of that item are ours, because a fixed ten was full of our own cases before a competitor could appear.
+   - the answer is recorded as **checked** (`sole` — nobody is down there with us) or **unchecked** (`ours`, `no-price`). Only the first is good news, and the panel counts them separately.
 5. Target = competitor minimum − N cents, inverted through the fee function (5% Steam + 10% publisher) by binary search.
 6. On the button: `removelisting` → pause → `sellitem`. Sales still need Steam Guard.
+7. Mass cancel is the same `removelisting` without the second half, and buy orders go through `cancelbuyorder`. Both stop at the **first** refusal from Steam rather than waiting out a pause and continuing, and both say how many they had done by then. Steam takes a cancelled listing or order off the page immediately, so nothing is re-read afterwards — the row says what happened to it.
+
+8. The offer list draws items as pictures: a tile carries only `classinfo/{appid}/{classid}/{instanceid}`, and the name arrives when you hover. Valuing an inbox therefore needs one `economy/itemclasshover` per **distinct class** — the only place in the extension that asks Steam about something the page did not already say. A class is immutable, so answers are kept in `chrome.storage.local` forever and a second inbox is nearly free. Before a large run the panel says how many unknown items there are and roughly how long that will take, because a user who is told «this is 300 requests» can decide and a user watching a progress bar cannot.
+
+9. **Levels.** `market/pricehistory` returns every recorded sale, and the three averages come off it. It is the strictest endpoint Steam has — about six a minute — so it is never automatic: a button, a count, an estimate in minutes, and a confirmation above a dozen items. Answers are kept for six hours, because a thirty-day average does not move in an afternoon. A window longer than the history is refused rather than answered: the «yearly average» of a three-week-old case is its three-week average, and calling it a year is a lie the user would price against. So is an average built on fewer than three sales.
 
 ## Architecture
 
@@ -81,21 +90,28 @@ Scheduler state survives worker eviction (`chrome.storage.session`). The price c
 
 ### Rate limits
 
-Steam marks **count in a window**, not the gap between calls. The scheduler is a token bucket, not a fixed sleep: the first ~18 requests leave immediately, and a pause appears only when the budget is actually spent.
+Steam publishes no quotas. What it actually meters is **count from one IPv4 in a window**, shared with the Steam client, other tabs, and other extensions. A 429 is often an HTML 200 page saying “too many requests”; `priceoverview` often answers `{success:false}` instead. Hitting the limiter during a ban extends it (hours, not seconds).
 
-| Endpoint | /min | Burst | Why |
+The scheduler is two token buckets: a **global IP budget** wrapping every call, plus a per-endpoint ceiling so a sell loop cannot starve price lookups.
+
+| Kind | /min | Burst | Why |
 |---|---|---|---|
-| `search/render` | 40 | 10 | The market UI uses it too |
-| `priceoverview` | 18 | 18 | Metered API, hard cap |
-| `listings/render` | 30 | 8 | True competitor floor |
-| `mylistings` / `inventory` | 12 | 4 | Heavy pages |
-| `sellitem` / `removelisting` | 20 | 2 | Plus its own pause between sales |
+| **IP (all of them)** | 20 | 6 | The real limiter |
+| `search/render` | 20 | 4 | Batch families; default source |
+| `priceoverview` | 15 | 4 | Metered API; SIH held 20 |
+| `listings/render` | 10 | 2 | Competitor floor, only when ours is the minimum |
+| `pricehistory` | 6 | 1 | Heavy, button only |
+| `mylistings` | 6 | 2 | One call per scan: asset ids, and which listings are ours |
+| `inventory` | 10 | 2 | Fallback only, in pages of 2000 (ASF's cap) |
+| `pricehistory` | 6 | 1 | The strictest of them. Never automatic; cached six hours |
+| `itemclasshover` | 20 | 5 | What an offer's items are; each class paid for once, ever |
+| `sellitem` / `removelisting` | 8 | 1 | 50–100 in a row is how people get 2–24 h bans |
 
-- A 429 **halves** the allowed rate and zeroes the burst; eight successes in a row give +2/min. Classic AIMD: it converges on the limit instead of oscillating around it.
-- The 429 counter decays on successes, so backoff does not stick at 15 s.
-- **Six failures in a row with no success** trip the breaker — but that is no longer a scan *error*: whatever was priced is returned, the rest becomes a “Load remaining prices” button. A partial result is useful; an aborted scan is not.
-- Steam's `Retry-After` always wins, and an active pause is never shortened.
+- A 429 **does not retry**, and the **first** one opens the breaker. Cooldown starts at 30 s (SIH's number) and `Retry-After` wins. Waiting out a pause and then sending the rest of a scan is how a 30-second microban becomes hours, so nothing restarts by itself: every button asks `allowSteamTraffic()` first and says how long is left.
+- `{success:false}` on a price is **not** “this item has no market”. Those keys stay unresolved so “Load remaining prices” can pick them up.
+- Eight successes in a row give +2/min (AIMD). An active pause is never shortened.
 - A price lives in the cache 15 minutes (configurable) and is shared across tabs, so a second scan is almost free.
+- Sales pause 2.5 s between items by default. The scan concurrency default is 2.
 
 The panel status shows the phase and progress. A pause is appended on the right and **distinguishes** `request budget Ns` (we are holding ourselves, this is fine) from `Steam limit Ns` (Steam refused). The popup has a log of the last 40 responses and remaining budget per endpoint.
 
@@ -113,7 +129,13 @@ Search turns itself off in two cases:
 - **nothing to batch** — N items would take N queries (emoticons, backgrounds, cards), so search is an extra round trip. Straight to `priceoverview`;
 - **it cannot find them** — if a sample of 6 groups matches under 30%, search is dropped and the rest is fetched one by one. That used to cost 700 useless requests.
 
-Order matters: with hundreds of listings the **most expensive** are priced first. If Steam cuts the scan in half, the half that landed is the half with the money.
+With the exact competitor floor on (the default), the repricer uses neither of these: it reads the cache, then goes straight to the listing book, because that is the only request that answers every time it is spent. Both sources stay in use for the inventory, the offers tab and buy orders, where the market minimum *is* the answer.
+
+A scan covers **this Steam page only** — typically ~10 listings or ~25 inventory tiles, not hundreds of unique hashes. Page Steam's own pager and scan again. Cached prices make a second page cheap.
+
+The two mass actions are aimed differently, on purpose. **Reprice** moves every ticked overpriced listing, shown or not — otherwise the number on the button would change with the search box. **Cancel** takes only the ticked rows *on screen*: it is the action a user aims with a filter («everything that says Copenhagen 2024, off the market»), so the visible set is the set.
+
+What happens *after* the prices land costs nothing: the inventory search, the filters (`marketable`, `priced`), the four sort orders and the bulk ticking all run over the prices already in hand. Selection is stored as «everything priced except what you unticked» — of whole stacks in the panel, and of single copies on the tiles — so «Load remaining prices» adds the newly priced stacks without quietly re-ticking what you dropped. Picking happens on **Ctrl+click** because a plain click is Steam's own: it opens the item. Only dropped copies are marked on the grid; a full selection leaves Steam's inventory looking untouched. There is no «hide listed items» because Steam takes a listed item out of the inventory grid itself — there is nothing left to hide.
 
 ### Trade checks
 
@@ -131,6 +153,34 @@ Checks, all on pure functions:
 | Unknown prices | warn | totals are incomplete, and that is said outright |
 
 If a lookalike's price could not be checked, the level drops to warn. Accusing without a number is not allowed.
+
+### Price levels
+
+Four targets, one implementation (`src/core/levels.ts`), used by three features so the number a user reads on the item page is the number the repricer will aim at:
+
+| Level | What it is |
+| --- | --- |
+| market | The cheapest listing that is not ours |
+| avg7 / avg30 / avg365 | Volume-weighted average of recorded sales over that window |
+
+Two rules keep an average from becoming a bad price:
+
+- **an average is never taken below the market.** If the month's average is under what somebody is asking right now, listing at the average is a discount nobody asked for. The target is clamped up to just under the cheapest competitor, and the row says that is what happened;
+- **a window longer than the history is not an average.** Steam happily serves three weeks of sales for a three-week-old case; averaging them and calling it a year is how a user prices something at a number that never existed. Same for fewer than three recorded sales.
+
+A level target also means repricing can move a listing **up**, which the old planner could not express — «are we already the cheapest» is not a question when the target is an absolute price. `planMove` sorts by distance in either direction; `planDrop` still only counts cuts.
+
+### The offer inbox
+
+The list page says everything except the one thing that decides the verdict: **which side is yours**. Steam marks the two blocks `primary` and `secondary`, which is layout, not meaning — and reading them backwards would turn a robbery into a bargain on screen. So the side is worked out in three layers, and how it was worked out is kept:
+
+1. **the avatars** — each block links to a person, and one of them is the partner from the offer header. This is the only signal that means anything;
+2. **the header text** — «You will receive» / «Вы получите», one translation away from breaking;
+3. **`primary` / `secondary`** — a guess, and marked as one. An offer decided this way carries a visible «could not tell which side is yours» on its row.
+
+What gets flagged: an offer that takes items and returns none; a value gap where you get under half of what you give; escrow; items arriving that cannot be sold on the market; sums that are incomplete because a price is missing. Every flag is a pure function over the two item lists.
+
+There is **no mass accept and no mass decline**. An offer moves items out of an account for good, the side detection is a heuristic, and a button that acts on a heuristic in bulk is how a mistake becomes irreversible. Each row is a link to the offer; the decision stays with the user.
 
 ### Item page
 
@@ -167,11 +217,12 @@ Panel, statuses, tabs, scheduler and cache come for free.
 |---|---|---|
 | Pause between relists | 1600 ms | Steam bans on frequency, not volume |
 | Below competitor | 1 ¢ | How far to undercut |
-| Price source | market search | Batched, soft limit |
+| Price source | market search | Batched, soft limit. Not used by the repricer while the exact floor is on |
 | Price freshness | 15 min | Up to 24 h. For large portfolios raise it: emoticon prices barely move |
 | Parallel price requests | 4 | The scheduler still spaces them |
 | One listing per item per pass | on | Otherwise several of our lots land on one price |
-| Exact competitor floor | on | Extra request where we ourselves hold the floor |
+| Sell strategy (panel) | by market minimum | Also: below, above, or by the week/month/year average |
+| Exact competitor floor | on | Reads the listing book instead of guessing from `priceoverview` — and *replaces* it, rather than adding to it |
 | Quick-buy cap | 500.00 | Ceiling for “Buy cheapest”. Zero disables buying |
 
 The inventory sell strategy is set on the panel — it changes from pass to pass, not once.
@@ -181,7 +232,7 @@ The popup also has Steam rate counters, remaining budget, a response log, and a 
 ## Tests
 
 ```bash
-npm test          # 247 tests
+npm test          # 611 tests
 npm run check     # typecheck + tests + build
 ```
 
@@ -192,7 +243,19 @@ Regressions that already happened are locked in:
 - parsing `1 234,56 pуб.` — a dot in the suffix was treated as the decimal mark and inflated the price 100×;
 - a pause stuck at 8–15 s after every request;
 - `296830-:CoffeeBreak:` as a search query — 57 requests for 4 prices;
-- `DataCloneError` posting raw Steam globals from the page world. Checked by asserting `structuredClone` of the projection does not throw: Node has no DOM, but a function and a cyclic reference are equally uncloneable.
+- `DataCloneError` posting raw Steam globals from the page world. Checked by asserting `structuredClone` of the projection does not throw: Node has no DOM, but a function and a cyclic reference are equally uncloneable;
+- `3 hours ago` in a listing row read as the price 3,00 ₽, and the Market Beta cell `0,05€ (0,03€)` glued into €50.03;
+- repricing a listing with no assetid: `removelisting` succeeds, `sellitem` cannot, and the lot is gone from the market. Such listings are refused at planning time now;
+- `cancelbuyorder` answering `{"success":8}` read as a success — the order was still there while the panel said the money was back. Only `1` counts now;
+- four copies of the same «what Steam said» switch, already drifted apart, so one refusal read differently in each tab (`src/content/ui/errors.ts`);
+- an item description cut short by a regex looking for the closing brace — `Sticker | {LOL}` ends the object early. The hover payload is walked with a brace counter that respects strings;
+- an unreadable hover answer cached as «no such item», which would have made the mistake permanent. Only real answers are kept;
+- a **tie read as a win**: our lot and a stranger's at the same price scored as «we already hold the minimum», and the lot sat there — at equal prices Steam sells the older listing first. A shared floor is now something to undercut, but only once Steam has confirmed the full set of our own listings, or it would be bidding against ourselves;
+- a fixed window of ten listings answering «no competitor» for anyone holding ten lots of the same case;
+- «no overpriced lots on this page» printed over items that were never checked, because a stopped scan left them looking like ordinary skips;
+- a «yearly average» computed from a three-week-old item's whole history, and an average built on two sales. Both are refused by name now;
+- **four search misses read as a ban.** `search/render` answers `success:false` when it simply cannot match a name — routine, and the whole reason the hit-rate guard exists — but the circuit breaker counted those toward the same streak as a `priceoverview` throttle and blocked the scan. Search misses no longer feed the breaker;
+- the optional pass running before the mandatory one: five search requests spent, zero items settled, and Steam cut the scan off before the listing book was ever opened.
 
 ## Roadmap (from SIH, Steam-only)
 
@@ -200,9 +263,11 @@ Regressions that already happened are locked in:
 - [x] Trade-offer analysis: side totals, highlight, lookalike swap
 - [x] Quick buy on the listing page
 - [x] Price-history chart (`market/pricehistory`)
-- [ ] Inventory: sort, filters, bulk select on tiles, quick sell, hide listed items
-- [ ] Own listings: search/filter, mass cancel, buy orders
-- [ ] Trade offer inbox as a whole, not one offer at a time
+- [x] Inventory: search, filters, sorting, bulk select, quick sell of one stack
+- [x] Inventory: pick single copies on Steam's own tiles (Ctrl+click)
+- [x] Own listings: search, sorting, per-row select, mass cancel
+- [x] Buy orders: what they hold, distance to the market, mass cancel
+- [x] Trade offer inbox as a whole, not one offer at a time
 - [ ] CS2: stickers, charms, Steam tags (not float)
 - [ ] Badge crafting, market-history export, local inventory-value snapshots
 - [ ] Auto-buy sniper — **not planned**: a purchase spends money, and each one stays a human call
@@ -217,7 +282,11 @@ Regressions that already happened are locked in:
 
 Steward — своё расширение для маркета, инвентаря и обменов Steam. Не SIH: без рекламы, подписок и телеметрии. Все запросы идут только на `steamcommunity.com`.
 
-**Умеет сейчас:** репрайс своих лотов, оценка инвентаря и массовая продажа, антискам на странице обмена, история цены и покупка самого дешёвого лота под лимитом.
+**Свои цены не запрашиваются** — они уже нарисованы на странице; запрос уходит только за чужими. Пропуск с пометкой «не проверено» отличается от пропуска «проверил, мы одни на минимуме», и «оверпрайса нет» больше не печатается поверх непроверенных лотов.
+
+**Уровни цен:** цель можно поставить не только «подрезать конкурента», но и «средняя за неделю / месяц / год» — по этим ценам предмет реально продавался. Лот тогда может уехать **вверх** и подождать. Средняя никогда не опускается ниже текущего рынка, а «средняя за год» у предмета трёхнедельной давности не считается вовсе. История продаж — самый медленный запрос Steam, поэтому она качается только по кнопке, с честно названной ценой в запросах и минутах, и живёт в кэше часами.
+
+**Умеет сейчас:** репрайс своих лотов с поиском и массовым снятием, заявки на покупку (сколько заморожено и насколько далеко от рынка), разбор всего списка обменов сразу, оценка инвентаря и массовая продажа, антискам на странице обмена, история цены и покупка самого дешёвого лота под лимитом.
 
 **Не будет:** цен с Buff/CSFloat/Skinport, float и paint seed (Steam их в вебе не отдаёт), SDA, автозакупки-снайпера.
 

@@ -1,8 +1,14 @@
-import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import "./support/env";
 
+import assert from "node:assert/strict";
+import { beforeEach, describe, it } from "node:test";
+
+import { jsonReply, reports, resetEnv, setAcquire, setSteam } from "./support/env";
+
+import { SteamError } from "../src/steam/net";
 import {
   downsample,
+  fetchPriceHistory,
   parseHistoryDate,
   parsePriceHistory,
   sparkline,
@@ -226,5 +232,50 @@ describe("sparkline", () => {
     assert.equal(sparkline([], 100, 20), null);
     assert.equal(sparkline([point(1, 100)], 100, 20), null, "one point is not a line");
     assert.equal(sparkline([point(2, 1), point(1, 2)], 0, 20), null);
+  });
+});
+
+
+describe("fetchPriceHistory, over the wire", () => {
+  beforeEach(async () => {
+    await resetEnv();
+    setAcquire(() => ({ ok: true }));
+  });
+
+  it("keeps «this has never sold» as an answer, not a refusal", async () => {
+    /**
+     * The endpoint the governor rations hardest, at roughly six calls a minute.
+     * Counting an empty series as a refusal cost twice: a thrown error is never
+     * cached, so an item that has genuinely never sold was re-asked on every
+     * scan — and four of them in a row opened the breaker and stopped the run.
+     */
+    setSteam(() => jsonReply({ success: true, prices: [] }));
+    assert.deepEqual(await fetchPriceHistory(753, "Never Sold", {}), []);
+    assert.deepEqual(
+      reports.map((r) => r.outcome),
+      ["ok"],
+      "an empty series must not be reported as a throttle"
+    );
+  });
+
+  it("still calls Steam's own «no» a refusal", async () => {
+    /**
+     * Measured, 2026-08-29: a name Steam does not know answers HTTP 500 with
+     * `{"success":false,"price_suffix":"руб.","prices":false}`.
+     */
+    setSteam(() => ({ status: 500, body: JSON.stringify({ success: false, prices: false }) }));
+    await assert.rejects(
+      () => fetchPriceHistory(753, "this item does not exist zz9", {}),
+      (err: unknown) => err instanceof SteamError && err.kind === "empty"
+    );
+    assert.deepEqual(reports.map((r) => r.outcome), ["empty"]);
+  });
+
+  it("reads the series Steam does send", async () => {
+    setSteam(() =>
+      jsonReply({ success: true, prices: [["Feb 17 2026 01: +0", 40.85, "3"]] })
+    );
+    const points = await fetchPriceHistory(730, "AK-47 | Redline (Minimal Wear)", {});
+    assert.deepEqual(points, [{ t: Date.UTC(2026, 1, 17, 1), price: 4085, volume: 3 }]);
   });
 });

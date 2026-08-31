@@ -70,6 +70,29 @@ export function parsePriceHistory(payload: PriceHistoryResponse): HistoryPoint[]
   return points;
 }
 
+/**
+ * The same series as `parsePriceHistory`, from the item page instead of a request.
+ *
+ * The rewritten page ships its histories as objects with a unix timestamp rather
+ * than the legacy `"Jul 25 2016 01: +0"` string, but the prices are wallet-unit
+ * floats in both, so `toCents` is shared. This is the cheaper of the two sources
+ * by a wide margin: `pricehistory` is the endpoint Steam refuses first, and the
+ * page hands over every item of the group at once for nothing.
+ */
+export function historyFromPage(
+  rows: readonly (readonly [number, number, number])[] | null | undefined
+): HistoryPoint[] {
+  const points: HistoryPoint[] = [];
+  for (const row of rows ?? []) {
+    const t = row[0] * 1000;
+    const price = toCents(row[1]);
+    if (!Number.isFinite(t) || price < 1) continue;
+    points.push({ t, price, volume: Number.isFinite(row[2]) ? row[2] : 0 });
+  }
+  points.sort((a, b) => a.t - b.t);
+  return points;
+}
+
 export interface HistoryStats {
   points: number;
   /** Most recent recorded sale. */
@@ -78,10 +101,20 @@ export interface HistoryStats {
   /** Averages weighted by how many actually sold. */
   average7d: Cents | null;
   average30d: Cents | null;
+  average365d: Cents | null;
   min30d: Cents | null;
   max30d: Cents | null;
   volume7d: number;
   volume30d: number;
+  volume365d: number;
+  /**
+   * How far back the history actually reaches, in days.
+   *
+   * A case released three weeks ago has a «yearly average» made of three weeks.
+   * Presenting that as a year is the kind of number a user prices against and
+   * then wonders why nothing sells.
+   */
+  spanDays: number;
 }
 
 function weightedAverage(points: HistoryPoint[]): Cents | null {
@@ -96,6 +129,17 @@ function weightedAverage(points: HistoryPoint[]): Cents | null {
   return weight ? Math.round(value / weight) : null;
 }
 
+const DAY_MS = 86_400_000;
+
+/** Volume-weighted average over the last `days`, or null when nothing sold then. */
+export function averageOver(
+  points: readonly HistoryPoint[],
+  days: number,
+  now = Date.now()
+): Cents | null {
+  return weightedAverage(points.filter((p) => now - p.t <= days * DAY_MS));
+}
+
 export function summarizeHistory(points: HistoryPoint[], now = Date.now()): HistoryStats {
   const empty: HistoryStats = {
     points: 0,
@@ -103,17 +147,22 @@ export function summarizeHistory(points: HistoryPoint[], now = Date.now()): Hist
     lastAt: null,
     average7d: null,
     average30d: null,
+    average365d: null,
     min30d: null,
     max30d: null,
     volume7d: 0,
     volume30d: 0,
+    volume365d: 0,
+    spanDays: 0,
   };
   if (!points.length) return empty;
 
-  const day = 86_400_000;
-  const within7 = points.filter((p) => now - p.t <= 7 * day);
-  const within30 = points.filter((p) => now - p.t <= 30 * day);
+  const within = (days: number) => points.filter((p) => now - p.t <= days * DAY_MS);
+  const within7 = within(7);
+  const within30 = within(30);
+  const within365 = within(365);
   const last = points[points.length - 1]!;
+  const first = points[0]!;
 
   return {
     points: points.length,
@@ -121,10 +170,15 @@ export function summarizeHistory(points: HistoryPoint[], now = Date.now()): Hist
     lastAt: last.t,
     average7d: weightedAverage(within7),
     average30d: weightedAverage(within30),
+    average365d: weightedAverage(within365),
     min30d: within30.length ? Math.min(...within30.map((p) => p.price)) : null,
     max30d: within30.length ? Math.max(...within30.map((p) => p.price)) : null,
     volume7d: within7.reduce((sum, p) => sum + p.volume, 0),
     volume30d: within30.reduce((sum, p) => sum + p.volume, 0),
+    volume365d: within365.reduce((sum, p) => sum + p.volume, 0),
+    /** From the first recorded sale to now, not to the last one: a dead item's
+     *  history is old, and that is exactly what the caller needs to know. */
+    spanDays: Math.max(0, Math.floor((now - first.t) / DAY_MS)),
   };
 }
 
@@ -231,9 +285,22 @@ export async function fetchPriceHistory(
   const data = await fetchJson<PriceHistoryResponse>(url, {
     kind: "history",
     ...pacing,
+    /**
+     * Measured against the live endpoint, 2026-08-29.
+     *
+     * A name Steam does not know answers HTTP 500 with
+     * `{"success":false,"prices":false}` — unmistakable. A name it does know
+     * answers 200 with an array. So `success:false`, or `prices` that is not an
+     * array, is Steam declining; an array is an answer whatever its length.
+     *
+     * Counting an empty array as a refusal cost twice over, both on the endpoint
+     * we are rationed hardest on: an item that has genuinely never sold was
+     * re-asked on every single scan, because a thrown error is never cached — and
+     * four of them in a row opened the breaker and stopped the whole run.
+     */
     isEmpty: (d) => {
       const r = d as PriceHistoryResponse;
-      return r?.success === false || !Array.isArray(r?.prices) || r.prices.length === 0;
+      return r?.success === false || !Array.isArray(r?.prices);
     },
   });
   return parsePriceHistory(data);

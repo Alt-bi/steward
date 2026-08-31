@@ -31,10 +31,54 @@ export async function removeListing(listingId: string, pacing: Pacing): Promise<
   try {
     json = JSON.parse(body) as { success?: boolean };
   } catch {
-    /* a non-JSON 200 is a normal success for this endpoint */
-    return;
+    /**
+     * An empty 200 is this endpoint's normal success and is already handled
+     * above. A 200 carrying something we cannot read is not: an expired session
+     * or an interstitial answers exactly like that, and calling it a success told
+     * the caller a lot had come off the market when nothing had happened at all.
+     * Which of the two it is cannot be known from here, so it is raised as not
+     * knowing rather than resolved by guessing.
+     */
+    throw new SteamError("not_json", "remove_unreadable");
   }
   if (json && json.success === false) throw new SteamError("http", "remove_failed");
+}
+
+/**
+ * Cancels a standing buy order and puts the held money back in the wallet.
+ *
+ * Steam answers this one with a numeric `success`: 1 is the only value that means
+ * the order is gone. Anything else is an error code, and treating it as a success
+ * would tell the user their money is back when it is not.
+ */
+export async function cancelBuyOrder(buyOrderId: string, pacing: Pacing): Promise<void> {
+  if (!buyOrderId) throw new SteamError("http", "no_buy_order_id");
+  const { status, text } = await postForm(
+    "https://steamcommunity.com/market/cancelbuyorder/",
+    new URLSearchParams({ sessionid: sessionId(), buy_orderid: buyOrderId }),
+    { kind: "write", ...pacing }
+  );
+  if (status < 200 || status >= 300) throw new SteamError("http", `cancel_buyorder_http_${status}`);
+
+  const body = text.trim();
+  if (!body) return;
+
+  let json: { success?: number | boolean; message?: string } | null = null;
+  try {
+    json = JSON.parse(body) as { success?: number | boolean; message?: string };
+  } catch {
+    /**
+     * Same rule as the delist: an empty 200 is the ordinary success and is
+     * handled above; a 200 we cannot read is not an answer. Telling the holder
+     * their money is back out of an unreadable reply is the worst way to be
+     * wrong about a buy order.
+     */
+    throw new SteamError("not_json", "cancel_unreadable");
+  }
+  if (json?.success == null) return;
+  if (json.success !== 1 && json.success !== true) {
+    throw new SteamError("http", String(json.message ?? `cancel_buyorder_${String(json.success)}`));
+  }
 }
 
 export interface SellResult {

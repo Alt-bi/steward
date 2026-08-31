@@ -1,12 +1,16 @@
 import { parseMoneyToCents } from "../core/money";
 import type { Cents, Listing, SteamAssetIndex } from "../core/types";
-import { fetchJsonRetry, sleep, SteamError, type Pacing } from "./net";
+import { fetchJson, type Pacing } from "./net";
 import { assetIndex, lookupAsset } from "./page-context";
 
 /**
- * Reading our own listings is the most brittle part of the whole extension:
- * Steam splits the data across three fields that each go missing under different
- * conditions, so everything is merged and nothing is trusted alone.
+ * Our own listings, read from what Steam has already drawn on this page.
+ *
+ * There is no request here on purpose: paging `GET /market/mylistings` to look at
+ * a table the browser has already rendered spends the IP budget that the prices
+ * need. What the page gives us is split across the row markup, the hover blob and
+ * `g_rgAssets`, and each of those is missing under some conditions, so everything
+ * is merged and nothing is trusted alone.
  */
 
 interface ListingInfo {
@@ -19,17 +23,6 @@ interface ListingInfo {
   asset?: { appid?: number; contextid?: string; id?: string; amount?: number | string };
 }
 
-interface MyListingsResponse {
-  success?: boolean;
-  pagesize?: number;
-  total_count?: number;
-  num_active_listings?: number;
-  results_html?: string;
-  hovers?: string;
-  listinginfo?: Record<string, ListingInfo>;
-  assets?: SteamAssetIndex;
-}
-
 interface HoverRef {
   appid: number;
   contextid: string;
@@ -39,16 +32,12 @@ interface HoverRef {
 interface ParsedRow {
   listingId: string;
   appid: number | null;
+  contextid?: string;
+  assetid?: string;
   hash: string;
   name: string;
   buyer: Cents;
   seller: Cents;
-}
-
-export interface LoadMeta {
-  total: number;
-  pages: number;
-  extracted: number;
 }
 
 function toInt(v: unknown): number {
@@ -59,8 +48,17 @@ function toInt(v: unknown): number {
 const HOVER_RE =
   /CreateItemHoverFromContainer\(\s*[^,]+,\s*'mylisting_(\d+)[^']*',\s*(\d+),\s*'(\d+)',\s*'(\d+)'/g;
 
-/** `hovers` is a blob of JS calls; it is the only place assetid survives some responses. */
-function parseHovers(hovers: string): Record<string, HoverRef> {
+function hoverFromBlob(blob: string): (HoverRef & { listingId: string }) | null {
+  const m =
+    /CreateItemHoverFromContainer\(\s*[^,]+,\s*'mylisting_(\d+)[^']*',\s*(\d+),\s*'(\d+)',\s*'(\d+)'/.exec(
+      blob
+    );
+  if (!m?.[1] || !m[2] || !m[3] || !m[4]) return null;
+  return { listingId: m[1], appid: Number(m[2]), contextid: m[3], assetid: m[4] };
+}
+
+/** `hovers` is a blob of JS calls; it is the only place assetid survives some rows. */
+export function parseHovers(hovers: string): Record<string, HoverRef> {
   const map: Record<string, HoverRef> = {};
   let m: RegExpExecArray | null;
   HOVER_RE.lastIndex = 0;
@@ -73,16 +71,82 @@ function parseHovers(hovers: string): Record<string, HoverRef> {
 }
 
 const ROW_SELECTOR = '.market_listing_row[id^="mylisting_"], [id^="mylisting_"]';
+const ROW_ID = /^mylisting_(\d+)$/;
 const NAME_LINK_SELECTOR = ".market_listing_item_name_link";
 const HREF_LINK_SELECTOR = 'a[href*="/market/listings/"]';
+
+/** A number that looks like a Steam money amount, not "3 hours ago". */
+const MONEY_TOKEN = /[0-9]+(?:[  ]?[0-9]{3})*(?:[.,][0-9]{1,2})?/g;
+
+function nodeText(node: { innerText?: string; textContent?: string | null } | null): string {
+  if (!node) return "";
+  return String(node.innerText || node.textContent || "").trim();
+}
+
+function isMoneyToken(token: string): boolean {
+  /** Steam always renders listings with decimals (`2,58 pуб.`). A bare `3` is a date. */
+  if (/[.,]\d{1,2}$/.test(token)) return true;
+  /** `1 234` / `1.234` thousands, no decimals. */
+  return /(?:[  ]|[.,])\d{3}$/.test(token);
+}
+
+/**
+ * Buyer (what the market compares) and seller (what you receive) from a price cell.
+ *
+ * Classic Steam: two spans, with-fee then without-fee.
+ * Market Beta: one cell `0,05€ (0,03€)` — buyer, then you-receive in parentheses.
+ * A listing row also contains "3 hours ago"; that `3` must never become 3,00 ₽.
+ */
+export function pricesFromListingText(text: string): { buyer: Cents; seller: Cents } {
+  const tokens = String(text ?? "").match(MONEY_TOKEN) ?? [];
+  const amounts = tokens.filter(isMoneyToken).map(parseMoneyToCents).filter((n) => n > 0);
+  if (amounts.length >= 2) {
+    let buyer = amounts[0]!;
+    let seller = amounts[1]!;
+    /** You-receive is the smaller number. If the cell put it first, unswap. */
+    if (seller > buyer) {
+      const tmp = buyer;
+      buyer = seller;
+      seller = tmp;
+    }
+    return { buyer, seller };
+  }
+  if (amounts.length === 1) return { buyer: amounts[0]!, seller: 0 };
+  return { buyer: 0, seller: 0 };
+}
+
+export function pricesFromListingRow(row: ParentNode): { buyer: Cents; seller: Cents } {
+  const withFee = row.querySelector(".market_listing_price_with_fee");
+  const withoutFee = row.querySelector(".market_listing_price_without_fee");
+  if (withFee) {
+    const buyer = parseMoneyToCents(nodeText(withFee));
+    const seller = parseMoneyToCents(nodeText(withoutFee));
+    if (buyer > 0) return { buyer, seller: seller > 0 ? seller : 0 };
+  }
+
+  const cell =
+    row.querySelector(".market_listing_my_price") ??
+    row.querySelector(".market_listing_their_price") ??
+    row.querySelector(".market_listing_price");
+  if (cell && cell !== row) {
+    const parsed = pricesFromListingText(nodeText(cell));
+    if (parsed.buyer > 0) return parsed;
+  }
+
+  return pricesFromListingText(nodeText(row as unknown as { innerText?: string; textContent?: string | null }));
+}
 
 function parseListingDoc(root: ParentNode | null): Record<string, ParsedRow> {
   const map: Record<string, ParsedRow> = {};
   if (!root) return map;
   for (const row of root.querySelectorAll<HTMLElement>(ROW_SELECTOR)) {
-    const listingId = String(row.id ?? "")
-      .replace(/^mylisting_/, "")
-      .split("_")[0];
+    /**
+     * Children reuse the listing id as `mylisting_123_name`. Taking those would
+     * overwrite the row — and they have no price, so the first number in the
+     * name or "3 hours ago" would win.
+     */
+    const idMatch = ROW_ID.exec(String(row.id ?? ""));
+    const listingId = idMatch?.[1];
     if (!listingId) continue;
 
     const link =
@@ -90,28 +154,22 @@ function parseListingDoc(root: ParentNode | null): Record<string, ParsedRow> {
       row.querySelector<HTMLAnchorElement>(HREF_LINK_SELECTOR);
     const href = link?.getAttribute("href") ?? "";
     const m = href.match(/\/market\/listings\/(\d+)\/([^/?#]+)/);
-
-    const priceCell = row.querySelector<HTMLElement>(".market_listing_price") ?? row;
-    const priceText = (priceCell.innerText || priceCell.textContent || "").trim();
-    const nums = priceText.match(/[0-9]+(?:[  ]?[0-9]{3})*(?:[.,][0-9]{1,2})?/g) ?? [];
     const name = (link?.textContent ?? "").trim();
+    const hover = hoverFromBlob(row.getAttribute("onmouseover") ?? "");
+    const prices = pricesFromListingRow(row);
 
     map[listingId] = {
       listingId,
-      appid: m?.[1] ? Number(m[1]) : null,
+      appid: hover?.appid ?? (m?.[1] ? Number(m[1]) : null),
+      contextid: hover?.contextid,
+      assetid: hover?.assetid,
       hash: m?.[2] ? decodeURIComponent(m[2]) : name,
       name,
-      buyer: nums[0] ? parseMoneyToCents(nums[0]) : 0,
-      seller: nums[1] ? parseMoneyToCents(nums[1]) : 0,
+      buyer: prices.buyer,
+      seller: prices.seller,
     };
   }
   return map;
-}
-
-function parseHtml(html: string): Record<string, ParsedRow> {
-  if (!html) return {};
-  const doc = new DOMParser().parseFromString(`<div>${html}</div>`, "text/html");
-  return parseListingDoc(doc);
 }
 
 function buyerFromInfo(info: ListingInfo): Cents {
@@ -120,11 +178,252 @@ function buyerFromInfo(info: ListingInfo): Cents {
   return toInt(price) + toInt(fee);
 }
 
-export function mergePage(data: MyListingsResponse): Listing[] {
-  const info = data.listinginfo ?? {};
-  const htmlRows = parseHtml(data.results_html ?? "");
-  const hovers = parseHovers(data.hovers ?? "");
-  const assets = data.assets ?? assetIndex();
+/**
+ * Listings Steam has already painted. SIH never paginates `/market/mylistings`
+ * just to look at the current page — neither do we.
+ */
+export function listingsFromDom(
+  root: ParentNode | null,
+  extras: { assets?: SteamAssetIndex | null; listinginfo?: Record<string, ListingInfo> } = {}
+): Listing[] {
+  const hoverHtml = root instanceof Element ? root.innerHTML : "";
+  return assembleListings({
+    info: extras.listinginfo,
+    htmlRows: parseListingDoc(root),
+    hovers: parseHovers(hoverHtml),
+    assets: extras.assets ?? assetIndex(),
+  });
+}
+
+const LISTING_HOST_IDS = [
+  "tabContentsMyActiveMarketListingsRows",
+  "tabContentsMyActiveMarketListingsTable",
+  "tabContentsMyListings",
+];
+
+export function listingsOnPage(): Listing[] {
+  if (typeof document === "undefined") return [];
+  for (const id of LISTING_HOST_IDS) {
+    const host = document.getElementById(id);
+    if (!host) continue;
+    const found = listingsFromDom(host, { assets: assetIndex() });
+    if (found.length) return found;
+  }
+  try {
+    const rows = document.querySelectorAll?.('.market_listing_row[id^="mylisting_"]');
+    if (rows && rows.length) return listingsFromDom(document.body, { assets: assetIndex() });
+  } catch {
+    /* test stub has no querySelectorAll */
+  }
+  return [];
+}
+
+export interface AssetRef {
+  appid: number;
+  contextid: string;
+  assetid: string;
+}
+
+/**
+ * listingid -> the item behind it.
+ *
+ * Which asset a listing holds is the one thing the page does not always say. The
+ * classic market writes `CreateItemHoverFromContainer(...)` onto every row, and
+ * that is where assetid comes from; layouts that drop it leave us able to cancel a
+ * listing but not to re-list it, which is the worst possible half-success.
+ */
+function assetRefs(rows: readonly ListingInfo[]): Map<string, AssetRef> {
+  const out = new Map<string, AssetRef>();
+  for (const row of rows) {
+    const asset = row.asset;
+    const assetid = asset?.id == null ? "" : String(asset.id);
+    if (!assetid || !row.listingid) continue;
+    out.set(String(row.listingid), {
+      appid: toInt(asset?.appid),
+      contextid: String(asset?.contextid ?? "2"),
+      assetid,
+    });
+  }
+  return out;
+}
+
+/** The map-keyed form, kept because the classic market still answers with it. */
+export function assetRefsFromListinginfo(
+  info: Record<string, ListingInfo> | null | undefined
+): Map<string, AssetRef> {
+  return assetRefs(
+    Object.entries(info ?? {}).map(([id, row]) => (row.listingid ? row : { ...row, listingid: id }))
+  );
+}
+
+/** Fills in listings the DOM could not resolve. Returns how many were repaired. */
+export function applyAssetRefs(listings: Listing[], refs: Map<string, AssetRef>): number {
+  let fixed = 0;
+  for (const listing of listings) {
+    if (listing.assetid) continue;
+    const ref = refs.get(listing.listingId);
+    if (!ref?.assetid) continue;
+    listing.assetid = ref.assetid;
+    listing.contextid = ref.contextid || listing.contextid;
+    if (!listing.appid && ref.appid) listing.appid = ref.appid;
+    fixed += 1;
+  }
+  return fixed;
+}
+
+/** What one `mylistings` answer told us about our own listings. */
+export interface MyListingsPage {
+  refs: Map<string, AssetRef>;
+  /** Every listing id Steam named. */
+  ids: Set<string>;
+  /**
+   * The answer covered every listing we hold, so a listing id outside `ids` is
+   * definitely somebody else's.
+   *
+   * This is the only way to tell a stranger's lot at our price from one of our own
+   * lots sitting on the next page — and undercutting the second is bidding against
+   * ourselves.
+   */
+  complete: boolean;
+}
+
+/**
+ * Every shape `mylistings` has answered in.
+ *
+ * Steam replaced the map keyed by listing id with three plain arrays, split by
+ * what a listing is waiting on. Both are read, because the old one is still what
+ * some layouts hand us and a helper that only knows the current shape breaks on
+ * the next rename — this one only stops working if the field names change too.
+ */
+interface MyListingsResponse {
+  success?: boolean;
+  listinginfo?: Record<string, ListingInfo>;
+  listings?: ListingInfo[];
+  /** Sold or listed too recently to be visible to buyers yet. Still ours. */
+  listings_on_hold?: ListingInfo[];
+  /** Waiting on the mobile confirmation. Ours the moment it is confirmed. */
+  listings_to_confirm?: ListingInfo[];
+  /**
+   * The shape Steam actually answers with today, measured 2026-08-29: no
+   * `listinginfo` and no `listings` at all, but a page of markup, the assets it
+   * draws, and the block of `CreateItemHoverFromContainer(…)` calls that ties the
+   * two together. That block is the only statement of which asset each listing
+   * holds, which is the one thing needed to put a lot back on the market.
+   */
+  hovers?: string;
+  results_html?: string;
+  total_count?: number;
+  num_active_listings?: number;
+}
+
+/** listingid -> asset, from the hover block. Empty on the older JSON shapes. */
+function hoverRefs(data: MyListingsResponse): Map<string, AssetRef> {
+  const out = new Map<string, AssetRef>();
+  for (const [id, hover] of Object.entries(parseHovers(String(data.hovers ?? "")))) {
+    out.set(id, { appid: hover.appid, contextid: hover.contextid, assetid: hover.assetid });
+  }
+  return out;
+}
+
+function rowsOf(data: MyListingsResponse): { active: ListingInfo[]; all: ListingInfo[] } {
+  const fromMap = Object.entries(data.listinginfo ?? {}).map(([id, row]) =>
+    row.listingid ? row : { ...row, listingid: id }
+  );
+  const active = [...fromMap, ...(data.listings ?? [])];
+  return { active, all: [...active, ...(data.listings_on_hold ?? []), ...(data.listings_to_confirm ?? [])] };
+}
+
+export function myListingsFrom(data: MyListingsResponse): MyListingsPage {
+  const { active, all } = rowsOf(data);
+  const hovers = hoverRefs(data);
+
+  /**
+   * A held or unconfirmed lot is still ours, and mistaking one for a stranger's
+   * is exactly the way to undercut yourself. So ownership counts all of them.
+   */
+  const ids = new Set<string>();
+  for (const row of all) if (row.listingid) ids.add(String(row.listingid));
+  for (const id of hovers.keys()) ids.add(id);
+
+  /**
+   * Completeness, though, is measured against the active set alone: `total_count`
+   * counts only active listings, so folding the others in would let one pending
+   * confirmation claim we had seen a page we had not.
+   */
+  const seen = new Set<string>();
+  for (const row of active) if (row.listingid) seen.add(String(row.listingid));
+  /** The markup Steam sends is one page of active listings, same as `listings`. */
+  for (const id of hovers.keys()) seen.add(id);
+
+  const stated = typeof data.total_count === "number" || typeof data.num_active_listings === "number";
+  const total = toInt(data.total_count) || toInt(data.num_active_listings);
+
+  const refs = assetRefs(all);
+  /** The JSON shapes win where both spoke; the hovers fill in what they did not. */
+  for (const [id, ref] of hovers) if (!refs.has(id)) refs.set(id, ref);
+
+  return {
+    refs,
+    ids,
+    /**
+     * No total at all means we cannot claim to have seen everything. A total of
+     * zero, on the other hand, is Steam saying there is nothing to see — and an
+     * account with no listings has certainly had all of them accounted for.
+     */
+    complete: stated && seen.size >= total,
+  };
+}
+
+/**
+ * One request for our own listings: the asset references the page hid, and the
+ * full set of our listing ids.
+ *
+ * Deliberately not the old paginating loop: no aliases, no second page. What is
+ * not in this answer is reported as not known, not fetched — a scan must not turn
+ * into a crawl of the whole market history.
+ */
+export async function fetchMyListings(count: number, pacing: Pacing): Promise<MyListingsPage> {
+  const size = Math.min(100, Math.max(10, count));
+  const data = await fetchJson<MyListingsResponse>(
+    `https://steamcommunity.com/market/mylistings?start=0&count=${size}`,
+    {
+      kind: "mylistings",
+      ...pacing,
+      /**
+       * Steam declining, and nothing else.
+       *
+       * Reading only one of the shapes here is how a renamed payload gets counted
+       * as a throttle four times over and trips the circuit breaker on a perfectly
+       * healthy account — and it did, twice: once when `listinginfo` became
+       * `listings`, and again when both vanished in favour of markup plus a hover
+       * block. So the test is now the other way round: an answer that states a
+       * count is an answer, whatever that count is, and an account with nothing
+       * listed is entitled to say so.
+       */
+      isEmpty: (d) => {
+        const r = (d ?? {}) as MyListingsResponse;
+        if (r.success === false) return true;
+        if (typeof r.total_count === "number" || typeof r.num_active_listings === "number") {
+          return false;
+        }
+        return rowsOf(r).all.length === 0 && hoverRefs(r).size === 0;
+      },
+    }
+  );
+  return myListingsFrom(data);
+}
+
+/** Joins the three half-answers Steam gives us into whole listings. */
+export function assembleListings(parts: {
+  info?: Record<string, ListingInfo>;
+  htmlRows?: Record<string, ParsedRow>;
+  hovers?: Record<string, HoverRef>;
+  assets?: SteamAssetIndex | null;
+}): Listing[] {
+  const info = parts.info ?? {};
+  const htmlRows = parts.htmlRows ?? {};
+  const hovers = parts.hovers ?? {};
+  const assets = parts.assets ?? {};
 
   const ids = new Set<string>([
     ...Object.keys(info),
@@ -140,8 +439,8 @@ export function mergePage(data: MyListingsResponse): Listing[] {
     const assetRef = row.asset ?? {};
 
     const appid = assetRef.appid ?? hover?.appid ?? parsed?.appid ?? null;
-    const contextid = String(assetRef.contextid ?? hover?.contextid ?? "2");
-    const assetid = assetRef.id ?? hover?.assetid ?? "";
+    const contextid = String(assetRef.contextid ?? hover?.contextid ?? parsed?.contextid ?? "2");
+    const assetid = String(assetRef.id ?? hover?.assetid ?? parsed?.assetid ?? "");
     const asset = lookupAsset(assets, appid, contextid, assetid);
 
     const hash = asset?.market_hash_name ?? asset?.market_name ?? parsed?.hash ?? asset?.name ?? "";
@@ -165,94 +464,4 @@ export function mergePage(data: MyListingsResponse): Listing[] {
     });
   }
   return out;
-}
-
-function hasRows(data: MyListingsResponse): boolean {
-  if (!data) return false;
-  if (data.listinginfo && Object.keys(data.listinginfo).length) return true;
-  if (data.results_html && /mylisting_/.test(data.results_html)) return true;
-  const n = data.num_active_listings ?? data.total_count;
-  return Boolean(data.success && n === 0);
-}
-
-/** Steam has moved this endpoint around; try the known spellings before giving up. */
-async function fetchPage(start: number, count: number, pacing: Pacing): Promise<MyListingsResponse> {
-  const qs = `start=${start}&count=${count}`;
-  const urls = [
-    `https://steamcommunity.com/market/mylistings?${qs}`,
-    `https://steamcommunity.com/market/mylistings/?${qs}`,
-    `https://steamcommunity.com/market/mylistings/render/?${qs}&query=`,
-  ];
-  let last: unknown = null;
-  for (const url of urls) {
-    try {
-      const data = await fetchJsonRetry<MyListingsResponse>(
-        url,
-        { kind: "mylistings", ...pacing },
-        2
-      );
-      if (hasRows(data)) return data;
-      last = new SteamError("empty", "mylistings_empty_payload");
-    } catch (err) {
-      last = err;
-      if (
-        err instanceof SteamError &&
-        (err.kind === "not_logged_in" || err.kind === "aborted" || err.kind === "blocked")
-      ) {
-        throw err;
-      }
-    }
-  }
-  throw last instanceof Error ? last : new SteamError("http", "mylistings_failed");
-}
-
-export interface LoadResult {
-  listings: Listing[];
-  meta: LoadMeta;
-}
-
-export async function loadMyListings(
-  pacing: Pacing & { onProgress?: (loaded: number, total: number) => void }
-): Promise<LoadResult> {
-  const count = 100;
-  const listings: Listing[] = [];
-  const seen = new Set<string>();
-  let start = 0;
-  let total: number | null = null;
-  let pages = 0;
-
-  while (pages < 40) {
-    if (pacing.abort?.()) throw new SteamError("aborted");
-    const data = await fetchPage(start, count, pacing);
-    pages += 1;
-    total ??= data.total_count ?? data.num_active_listings ?? 0;
-
-    const batch = mergePage(data);
-    for (const listing of batch) {
-      if (seen.has(listing.listingId)) continue;
-      seen.add(listing.listingId);
-      listings.push(listing);
-    }
-    pacing.onProgress?.(listings.length, total || listings.length);
-
-    if (!batch.length) break;
-    start += data.pagesize ?? batch.length ?? count;
-    if (total && start >= total) break;
-    await sleep(250);
-  }
-
-  /** Last resort: scrape whatever the page already rendered. */
-  if (!listings.length) {
-    const host = document.getElementById("tabContentsMyListings") ?? document.body;
-    listings.push(
-      ...mergePage({
-        results_html: host.innerHTML,
-        hovers: document.documentElement.innerHTML,
-        assets: assetIndex() ?? {},
-        listinginfo: {},
-      })
-    );
-  }
-
-  return { listings, meta: { total: total ?? 0, pages, extracted: listings.length } };
 }

@@ -1,0 +1,11 @@
+{
+  "loaderData": [
+    "<omitted: carries a live WebAPI token>",
+    "{\"backgroundAppID\":null}",
+    "false",
+    "{\"success\":true,\"appid\":753,\"bCommodity\":true,\"buckets\":[{\"bucket_id\":\"318680-Remy Chaveau\"}],\"listingQuery\":{\"appid\":753,\"strItemName\":\"318680-Remy Chaveau\",\"filters\":{},\"accessoryFilters\":{},\"propertyFilters\":{}},\"myOrders\":{\"rgBuyOrders\":[],\"rgSellOrders\":[{\"appid\":753,\"assetid\":\"900000000002\",\"classid\":\"1387316330\",\"listingid\":\"555779000000000001\",\"rtListed\":1783055907,\"strBuyerPrice\":\"5,27 руб.\",\"strSellerPrice\":\"3,55 руб.\"}]}}"
+  ],
+  "renderContext": {
+    "queryData": "{\"mutations\":[],\"queries\":[{\"queryHash\":\"[\\\"market_item_search\\\",{\\\"accessoryFilters\\\":{},\\\"appid\\\":753,\\\"filters\\\":{},\\\"propertyFilters\\\":{},\\\"strItemName\\\":\\\"318680-Remy Chaveau\\\"}]\",\"queryKey\":[\"market_item_search\",{\"appid\":753,\"strItemName\":\"318680-Remy Chaveau\",\"filters\":{},\"accessoryFilters\":{},\"propertyFilters\":{}}],\"state\":{\"data\":{\"pages\":[{\"more\":false,\"start\":0,\"total_count\":1,\"listings\":[{\"listingid\":\"555779000000000001\",\"unPrice\":355,\"unFee\":172,\"publisherFeePct\":0.10000000149011612,\"eCurrency\":5,\"bMine\":true,\"description\":{\"market_hash_name\":\"318680-Remy Chaveau\"},\"asset\":{\"appid\":753,\"contextid\":\"6\",\"assetid\":\"900000000002\",\"id\":\"900000000002\",\"classid\":\"1387316330\"}}]}],\"pageParams\":[0]},\"status\":\"success\"}},{\"queryHash\":\"[\\\"market\\\",\\\"pricehistory\\\",753,\\\"318680-Remy Chaveau\\\"]\",\"queryKey\":[\"market\",\"pricehistory\",753,\"318680-Remy Chaveau\"],\"state\":{\"data\":{\"ecurrency\":5,\"prices\":[{\"time\":1777939200,\"price_median\":5.378732681274414,\"purchases\":1},{\"time\":1781395200,\"price_median\":5.991738319396973,\"purchases\":1},{\"time\":1781740800,\"price_median\":6.042045593261719,\"purchases\":1},{\"time\":1784937600,\"price_median\":5.773963451385498,\"purchases\":1}]},\"status\":\"success\"}}]}"
+  }
+}

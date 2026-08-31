@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { badgeDataFrom, parseTileId } from "../src/content/features/inventory/badges";
+import {
+  badgeDataFrom,
+  parseTileId,
+  tilePickFromEvent,
+  visibleTileRefs,
+} from "../src/content/features/inventory/badges";
 import type { InventoryItem } from "../src/steam/inventory";
 
 function item(assetid: string, hash: string, appid = 730): InventoryItem {
@@ -85,5 +90,85 @@ describe("badgeDataFrom", () => {
     const data = badgeDataFrom([item("1", "Case")], { "730\tCase": 1234 }, format);
     assert.equal(data.format(data.priceByAsset.get("1") ?? null), "1234");
     assert.equal(data.format(null), "—");
+  });
+});
+
+describe("visibleTileRefs", () => {
+  function tile(
+    id: string,
+    page: { hidden?: boolean; disabled?: boolean } | null
+  ): {
+    getAttribute: (name: string) => string | null;
+    closest: (sel: string) => unknown;
+  } {
+    const pageEl =
+      page == null
+        ? null
+        : {
+            classList: { contains: (c: string) => Boolean(page.disabled && c === "disabled") },
+            style: { display: page.hidden ? "none" : "" },
+            getAttribute: (name: string) =>
+              name === "style" && page.hidden ? "display: none" : null,
+          };
+    return {
+      getAttribute: (name: string) => (name === "id" ? id : null),
+      closest: (sel: string) => (sel === ".inventory_page" ? pageEl : null),
+    };
+  }
+
+  it("keeps tiles on the current Steam page and drops hidden ones", () => {
+    const shown = tile("730_2_1", { hidden: false });
+    const hidden = tile("730_2_2", { hidden: true });
+    const junk = tile("tabContentsMyListings_2", { hidden: false });
+    const root = {
+      querySelector: (sel: string) => (sel === ".inventory_page" ? shown : null),
+      querySelectorAll: () => [shown, hidden, junk],
+    };
+    const refs = visibleTileRefs(root as unknown as ParentNode);
+    assert.deepEqual(refs, [{ appid: 730, contextid: "2", assetid: "1" }]);
+  });
+
+  it("dedupes the same asset painted twice", () => {
+    const a = tile("730_2_9", { hidden: false });
+    const b = tile("730_2_9", { hidden: false });
+    const root = {
+      querySelector: () => a,
+      querySelectorAll: () => [a, b],
+    };
+    assert.equal(visibleTileRefs(root as unknown as ParentNode).length, 1);
+  });
+});
+
+describe("tilePickFromEvent", () => {
+  function target(id: string | null): { closest: (sel: string) => unknown } {
+    const tile =
+      id == null ? null : { getAttribute: (name: string) => (name === "id" ? id : null) };
+    return { closest: (sel: string) => (sel === ".item[id]" ? tile : null) };
+  }
+
+  it("takes a Ctrl+click on a tile", () => {
+    const ref = tilePickFromEvent({ ctrlKey: true, button: 0, target: target("730_2_55") });
+    assert.deepEqual(ref, { appid: 730, contextid: "2", assetid: "55" });
+  });
+
+  it("takes ⌘+click too, for Macs", () => {
+    assert.ok(tilePickFromEvent({ metaKey: true, target: target("730_2_55") }));
+  });
+
+  it("leaves a plain click to Steam, which uses it to open the item", () => {
+    assert.equal(tilePickFromEvent({ target: target("730_2_55") }), null);
+  });
+
+  it("ignores clicks that are not on a tile", () => {
+    assert.equal(tilePickFromEvent({ ctrlKey: true, target: target(null) }), null);
+    assert.equal(tilePickFromEvent({ ctrlKey: true, target: {} }), null);
+    assert.equal(tilePickFromEvent({ ctrlKey: true }), null);
+  });
+
+  it("ignores a right-click, which opens a context menu", () => {
+    assert.equal(
+      tilePickFromEvent({ ctrlKey: true, button: 2, target: target("730_2_55") }),
+      null
+    );
   });
 });

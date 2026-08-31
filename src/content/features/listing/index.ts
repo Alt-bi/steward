@@ -2,20 +2,44 @@ import { formatCents } from "../../../core/money";
 import { loadSettings, type Settings } from "../../../core/settings";
 import type { Cents } from "../../../core/types";
 import { buyListing } from "../../../steam/actions";
-import { fetchCheapestListings, type MarketListing } from "../../../steam/listings";
-import { SteamError, type WaitReason } from "../../../steam/net";
-import { currencyId, sessionId, waitForPage } from "../../../steam/page-context";
+import { learnGroups } from "../../../steam/grouping";
+import {
+  fetchCheapestListings,
+  listingsFromInfo,
+  listingsFromSsr,
+  type MarketListing,
+} from "../../../steam/listings";
+import { focusedItem, isItemOnPage } from "../../../page/ssr";
+import { allowSteamTraffic, SteamError, type WaitReason } from "../../../steam/net";
+import {
+  bucketMinimum,
+  currencyId,
+  itemPage,
+  listingInfo,
+  orderBook,
+  sessionId,
+  waitForPage,
+} from "../../../steam/page-context";
 import {
   downsample,
   fetchPriceHistory,
+  historyFromPage,
   sparkline,
   summarizeHistory,
   type HistoryPoint,
   type HistoryStats,
 } from "../../../steam/pricehistory";
 import { el, type StatusKind } from "../../ui/panel";
+import { describeError } from "../../ui/errors";
+import { describeMissingLevel, levelLabel, levelLadder } from "../../../core/levels";
 import { register, type FeatureContext } from "../registry";
-import { describeLiquidity, judgePrice, type PriceJudgement } from "./verdict";
+import {
+  describeDemand,
+  describeLiquidity,
+  describeNoListings,
+  judgePrice,
+  type PriceJudgement,
+} from "./verdict";
 
 /**
  * The single-item page: what it costs now, what it has been going for, and whether
@@ -34,9 +58,29 @@ interface State {
   appid: number;
   hash: string;
   listings: MarketListing[];
+  /**
+   * The market minimum when we know it but hold no listing rows for this item.
+   *
+   * The rewritten page ships the book for whichever item of the group it opened
+   * on, but a minimum for every one of them. Open a different wear and there is
+   * nothing to list — yet the price, which is most of what the panel is for, is
+   * sitting right there.
+   */
+  marketLow: Cents | null;
+  /**
+   * The demand side, when the page shipped it. Steam asks for the focused item
+   * only, so this is null on every other item of a group.
+   */
+  demand: string;
   history: HistoryPoint[];
   stats: HistoryStats | null;
   judgement: PriceJudgement | null;
+  /**
+   * Whether a read has actually happened. Without it an empty row list reads the
+   * same before and after the button, and «press the button» is what the panel
+   * said to a user who had just pressed it.
+   */
+  checked: boolean;
 }
 
 /** `/market/listings/730/AK-47%20%7C%20Redline%20(Field-Tested)` */
@@ -56,25 +100,6 @@ function money(cents: Cents | null | undefined): string {
   return formatCents(cents, currencyId());
 }
 
-function describeError(err: unknown): string {
-  if (err instanceof SteamError) {
-    switch (err.kind) {
-      case "not_logged_in":
-        return "нужен логин Steam в этой вкладке";
-      case "rate_limited":
-      case "blocked":
-        return "Steam упёрся в лимит";
-      case "empty":
-        return "Steam не отдал историю продаж";
-      case "aborted":
-        return "остановлено";
-      default:
-        return err.message;
-    }
-  }
-  return err instanceof Error ? err.message : String(err);
-}
-
 const BUY_ERRORS: Record<string, string> = {
   over_the_limit: "цена выше лимита быстрой покупки — подними его в настройках, если это осознанно",
   price_does_not_add_up: "цена и комиссия не сходятся с суммой — покупка отменена",
@@ -84,6 +109,8 @@ const BUY_ERRORS: Record<string, string> = {
 async function mount(ctx: FeatureContext): Promise<void> {
   const target = parseListingUrl(location.pathname);
   if (!target) return;
+  /** What stands in the URL, kept apart from `state.hash` once the page names it. */
+  const urlName = target.hash;
 
   const section = ctx.panel.addSection("listing", "Предмет");
 
@@ -94,9 +121,12 @@ async function mount(ctx: FeatureContext): Promise<void> {
     appid: target.appid,
     hash: target.hash,
     listings: [],
+    marketLow: null,
+    demand: "",
     history: [],
     stats: null,
     judgement: null,
+    checked: false,
   };
 
   const stats = el("div", "stw-stats");
@@ -120,6 +150,15 @@ async function mount(ctx: FeatureContext): Promise<void> {
   const chartBox = el("div", "stw-chart");
   chartBox.hidden = true;
 
+  /**
+   * The ladder: what the item asks now against what it has been selling for.
+   *
+   * This is the same set of levels the repricer and the inventory can list at, so
+   * a user can read a price here and recognise the option there.
+   */
+  const ladderBox = el("div", "stw-ladder");
+  ladderBox.hidden = true;
+
   const actions = el("div", "stw-actions");
   const checkBtn = el("button", "stw-btn stw-btn-primary", "Посмотреть цену");
   checkBtn.type = "button";
@@ -132,7 +171,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   actions.append(checkBtn, buyBtn, stopBtn);
 
   const rows = el("div", "stw-rows");
-  section.body.append(stats, verdictBox, chartBox, actions, rows);
+  section.body.append(stats, verdictBox, ladderBox, chartBox, actions, rows);
 
   let phase = "";
   let phaseKind: StatusKind = "";
@@ -175,6 +214,17 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
   function cheapest(): MarketListing | null {
     return state.listings[0] ?? null;
+  }
+
+  /**
+   * What one costs right now — the one number the whole panel hangs off.
+   *
+   * The cheapest lot when we hold the rows, and the market minimum when we only
+   * know that. Keeping the two apart is how the verdict came to be judged against
+   * a price the stat above it was still showing as «—».
+   */
+  function currentBuyer(): Cents | null {
+    return cheapest()?.buyer ?? state.marketLow;
   }
 
   const VERDICT_TEXT: Record<PriceJudgement["verdict"], string> = {
@@ -235,9 +285,40 @@ async function mount(ctx: FeatureContext): Promise<void> {
     chartBox.hidden = false;
   }
 
+  function renderLadder(): void {
+    if (!state.stats?.points) {
+      ladderBox.hidden = true;
+      return;
+    }
+    const now = currentBuyer();
+    ladderBox.replaceChildren();
+    for (const value of levelLadder(now, state.stats)) {
+      if (value.level === "market") continue;
+      const row = el("div", "stw-ladder-row");
+      row.append(el("span", "stw-ladder-l", levelLabel(value.level)));
+      if (value.buyer == null) {
+        row.append(el("span", "stw-ladder-v stw-muted", "—"));
+        row.title = describeMissingLevel(value);
+      } else {
+        row.append(el("span", "stw-ladder-v", money(value.buyer)));
+        if (now != null && now > 0) {
+          const diff = Math.round((value.buyer / now - 1) * 100);
+          /** Against the current ask, because that is the number on the page. */
+          const tone = diff > 0 ? "ok" : diff < 0 ? "warn" : "";
+          const tag = el("span", "stw-ladder-d", `${diff > 0 ? "+" : ""}${diff}% к текущей`);
+          tag.dataset.level = tone;
+          row.append(tag);
+        }
+        row.title = `${value.volume} продаж(и) за период`;
+      }
+      ladderBox.appendChild(row);
+    }
+    ladderBox.hidden = false;
+  }
+
   function renderAll(): void {
-    const low = cheapest();
-    statNodes.now!.textContent = low ? money(low.buyer) : "—";
+    const now = currentBuyer();
+    statNodes.now!.textContent = now == null ? "—" : money(now);
     statNodes.avg!.textContent = money(state.stats?.average30d ?? null);
     statNodes.low!.textContent = money(state.stats?.min30d ?? null);
 
@@ -249,19 +330,30 @@ async function mount(ctx: FeatureContext): Promise<void> {
       verdictBox.hidden = true;
     }
 
+    renderLadder();
     renderChart();
 
     rows.replaceChildren();
-    if (!state.listings.length) {
-      rows.appendChild(el("div", "stw-empty", "Нажми «Посмотреть цену»."));
-      return;
+
+    /**
+     * These two describe the item, not the lots, so they are drawn whenever we
+     * have them. They used to sit behind a `listings.length` guard, and on a
+     * grouped page that guard is usually shut: measured on the live Redline
+     * page, all twenty rows Steam ships are Battle-Scarred and Well-Worn while
+     * the page is focused on Minimal Wear, so the panel had a price, an average,
+     * a verdict and a chart — and under them the words «press the button».
+     */
+    for (const line of [state.demand, state.stats ? describeLiquidity(state.stats) : ""]) {
+      if (!line) continue;
+      const row = el("div", "stw-row stw-row-warn");
+      row.dataset.kind = "info";
+      row.append(el("div", "stw-name", line));
+      rows.appendChild(row);
     }
 
-    if (state.stats) {
-      const liquidity = el("div", "stw-row stw-row-warn");
-      liquidity.dataset.kind = "info";
-      liquidity.append(el("div", "stw-name", describeLiquidity(state.stats)));
-      rows.appendChild(liquidity);
+    if (!state.listings.length) {
+      rows.appendChild(el("div", "stw-empty", describeNoListings(state.checked, state.marketLow)));
+      return;
     }
 
     for (let i = 0; i < Math.min(state.listings.length, 8); i++) {
@@ -285,35 +377,148 @@ async function mount(ctx: FeatureContext): Promise<void> {
     if (state.busy) return;
     state.abort = false;
     setBusy(true);
+    const quiet = await allowSteamTraffic();
+    if (quiet) {
+      status(quiet, "warn");
+      setBusy(false);
+      return;
+    }
     state.settings = await loadSettings();
     await waitForPage();
 
     try {
       status("Читаю лоты…", "work");
-      state.listings = await fetchCheapestListings(state.appid, state.hash, pacing, 10);
+      const page = itemPage();
+      /**
+       * Which item of the group we are actually looking at.
+       *
+       * The URL is not the answer on a grouped page: it stands at a group id,
+       * which is nobody's hash name, so the bucket, the book rows and the
+       * history all missed and the panel fell back to a request for a book it
+       * already had — then read the cheapest row of a mixed group, of whatever
+       * wear, as this page's price. The page names its own focus; use it.
+       */
+      state.hash = focusedItem(page, urlName);
+      /**
+       * A grouped page carries the internal name every wear of this skin answers
+       * to. Learn it for the whole bucket list — the exact scan of the market
+       * front page will ask the book by it instead of a name Steam ignores.
+       */
+      if (page?.itemName && page.buckets.length && !page.buckets.some((b) => b.hash === page.itemName)) {
+        learnGroups(
+          state.appid,
+          new Map(page.buckets.map((b) => [b.hash, page.itemName!]))
+        );
+      }
+      /**
+       * Three sources, cheapest first. The rewritten item page carries the whole
+       * book with our own lots already flagged; the classic page still has
+       * `g_rgListingInfo`; and only if neither is there do we spend a request —
+       * which on the rewritten market answers with the page itself, and is
+       * reported as such rather than retried.
+       */
+      const fromSsr = listingsFromSsr(page?.listings, state.hash);
+      const fromPage = fromSsr.length ? fromSsr : listingsFromInfo(listingInfo() ?? undefined);
+      state.marketLow = bucketMinimum(state.hash);
+      /**
+       * The request is the last resort, and only when nothing on the page speaks
+       * for this item at all. With a bucket minimum in hand it would buy a worse
+       * answer than we already have — and on the rewritten market it answers
+       * with the page itself anyway.
+       */
+      state.listings = fromPage.length
+        ? fromPage
+        : state.marketLow != null
+          ? []
+          : await fetchCheapestListings(
+              state.appid,
+              /** The name Steam answers to, which on a grouped page is the group. */
+              page?.itemName ?? urlName,
+              pacing,
+              10,
+              state.hash
+            );
 
-      status("Читаю историю продаж…", "work");
-      try {
-        state.history = await fetchPriceHistory(state.appid, state.hash, pacing);
-      } catch (err) {
-        /** No history is a smaller problem than no prices; keep what we have. */
+      /**
+       * The page ships a history for every item of the group, so on a rewritten
+       * page this costs nothing at all — and `pricehistory` is the endpoint the
+       * governor rations hardest, at roughly six calls a minute.
+       */
+      /** Whether the name we ended up with is one this page calls an item. */
+      const resolved = isItemOnPage(page, state.hash);
+
+      const shipped = historyFromPage(page?.histories.find((h) => h.hash === state.hash)?.points);
+      if (shipped.length) {
+        state.history = shipped;
+      } else if (!resolved) {
+        /**
+         * The only name we have is one this page does not treat as an item — a
+         * group id we could not resolve to a wear. `pricehistory` answers for one
+         * of those: measured, 894 points for `G1807209A023004`, a series mixing
+         * every wear and every StatTrak variant together. It would draw a chart
+         * and carry a verdict, both about no item that exists. Better to have no
+         * history than a confident one belonging to something else.
+         */
         state.history = [];
-        if (err instanceof SteamError && err.kind === "aborted") throw err;
+      } else {
+        status("Читаю историю продаж…", "work");
+        try {
+          state.history = await fetchPriceHistory(state.appid, state.hash, pacing);
+        } catch (err) {
+          /** No history is a smaller problem than no prices; keep what we have. */
+          state.history = [];
+          if (err instanceof SteamError && err.kind === "aborted") throw err;
+        }
       }
 
       state.stats = summarizeHistory(state.history);
-      state.judgement = judgePrice(cheapest()?.buyer ?? null, state.stats);
+      state.judgement = judgePrice(currentBuyer(), state.stats);
+      /** Free: the page carries it, and only for the item it is focused on. */
+      state.demand = resolved ? describeDemand(orderBook(state.hash), money) : "";
+      state.checked = true;
       renderAll();
 
-      if (!state.listings.length) {
-        status("Лотов на продажу нет.", "warn");
+      /**
+       * A grouped page is a chooser, not an item: Steam redirects every wear's own
+       * URL onto the group and highlights one of them. The panel follows that
+       * highlight, and says so — numbers for a wear the user did not name are only
+       * honest if they carry the wear's name.
+       */
+      const scope = state.hash === urlName ? "" : `Из группы взял «${state.hash}». `;
+
+      if (!resolved) {
+        /**
+         * We are standing on a group and Steam did not say which of its items the
+         * page is showing. Every number available here belongs to the group as a
+         * whole — a minimum that is some other wear's, a history that averages ten
+         * of them — so the honest output is none of them.
+         */
+        status(
+          `Страница стоит на группе «${urlName}», а какой предмет она показывает — Steam ` +
+            "не назвал. Цифры по группе смешивают разные предметы, поэтому не считаю их. " +
+            "Открой конкретный износ из списка на странице.",
+          "warn"
+        );
+      } else if (!state.listings.length && state.marketLow != null) {
+        /**
+         * Not «no listings»: Steam named a minimum, it just did not hand us the
+         * individual lots for this item of the group. Everything but the buy
+         * button works, so say what is missing rather than what is broken.
+         */
+        status(
+          `${scope}Минимум ${money(state.marketLow)}. Отдельные лоты Steam на этой странице ` +
+            "не показал — покупка в один клик недоступна.",
+          "warn"
+        );
+      } else if (!state.listings.length) {
+        status(`${scope}Лотов на продажу нет.`, "warn");
       } else if (!state.history.length) {
-        status("Цены есть, истории продаж Steam не дал.", "warn");
+        status(`${scope}Цены есть, истории продаж Steam не дал.`, "warn");
       } else {
-        status(`Готово. Продаж за месяц: ${state.stats.volume30d}.`, "ok");
+        status(`${scope}Готово. Продаж за месяц: ${state.stats.volume30d}.`, "ok");
       }
     } catch (err) {
-      status(`Цена: ${describeError(err)}`, "err");
+      status(`Цена: ${describeError(err, { empty: "Steam не отдал историю продаж" })}`, "err");
     } finally {
       setBusy(false);
     }
@@ -327,6 +532,17 @@ async function mount(ctx: FeatureContext): Promise<void> {
     if (state.busy) return;
     const listing = cheapest();
     if (!listing) return;
+
+    /**
+     * The page now tells us whose each lot is, and the cheapest one is ours
+     * whenever we hold the minimum. Steam would refuse the purchase anyway; the
+     * point of catching it here is that the confirmation never offers to spend
+     * money on something that cannot be bought.
+     */
+    if (listing.mine) {
+      status("Самый дешёвый лот — твой собственный. Покупать нечего.", "warn");
+      return;
+    }
 
     state.settings = await loadSettings();
     const cap = state.settings.quickBuyMaxCents;
@@ -388,7 +604,8 @@ async function mount(ctx: FeatureContext): Promise<void> {
     status("Останавливаю…", "warn");
   });
 
-  status(`${state.hash} — нажми «Посмотреть цену».`);
+  /** The URL, because until the page is read we do not yet know what it is about. */
+  status(`${urlName} — нажми «Посмотреть цену».`);
   renderAll();
 }
 

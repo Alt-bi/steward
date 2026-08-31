@@ -23,6 +23,7 @@ export const reports: { kind: NetKind; outcome: string; detail?: string }[] = []
 const sessionStore: Record<string, unknown> = {};
 let localStore: Record<string, unknown> = {};
 const priceCache = new Map<string, { cents: number; expires: number }>();
+const namingStore = new Map<string, string>();
 
 export function setSteam(handler: SteamHandler): void {
   steam = handler;
@@ -49,6 +50,21 @@ export function cacheSize(): number {
   return priceCache.size;
 }
 
+/** Plants a group id a previous run would have learned. */
+export function seedNaming(hash: string, groupId: string): void {
+  namingStore.set(hash, groupId);
+}
+
+/** What the store holds now, for assertions. */
+export function namingFacts(): Record<string, string> {
+  return Object.fromEntries(namingStore);
+}
+
+/** Puts a value where a previous worker would have left it. */
+export function seedSession(key: string, value: unknown): void {
+  sessionStore[key] = value;
+}
+
 export function setLocalSettings(values: Record<string, unknown>): void {
   localStore = { ...values };
 }
@@ -58,6 +74,7 @@ export async function resetEnv(): Promise<void> {
   reports.length = 0;
   postedToPage.length = 0;
   priceCache.clear();
+  namingStore.clear();
   localStore = {};
   for (const key of Object.keys(sessionStore)) delete sessionStore[key];
   acquireOverride = null;
@@ -106,6 +123,22 @@ async function dispatch(message: Envelope): Promise<unknown> {
     case "cache/clear":
       priceCache.clear();
       return { ok: true };
+    case "naming/get": {
+      const { keys } = message.payload as Protocol["naming/get"]["req"];
+      const hits: Record<string, string | null> = {};
+      for (const key of keys) hits[key] = namingStore.get(key) ?? null;
+      return { hits };
+    }
+    case "naming/set": {
+      const { entries } = message.payload as Protocol["naming/set"]["req"];
+      for (const e of entries) namingStore.set(e.hash, e.groupId);
+      return { ok: true };
+    }
+    case "naming/drop": {
+      const { keys } = message.payload as Protocol["naming/drop"]["req"];
+      for (const key of keys) namingStore.delete(key);
+      return { ok: true };
+    }
     case "log/note":
       return { ok: true };
     case "log/read":
@@ -144,6 +177,7 @@ g.postMessage = (data: unknown) => {
 g.document = {
   cookie: "",
   getElementById: () => null,
+  querySelector: () => null,
   querySelectorAll: () => [],
   documentElement: { innerHTML: "" },
   body: { innerHTML: "" },
@@ -153,10 +187,25 @@ g.chrome = {
   runtime: {
     sendMessage: (message: Envelope) => dispatch(message),
     onMessage: { addListener: () => {} },
+    getManifest: () => ({ version: "0.0-test" }),
   },
   storage: {
     session: {
-      get: async (key: string) => ({ [key]: sessionStore[key] }),
+      get: async (key: string | string[]) => {
+        /**
+         * A real `chrome.storage` read crosses a process boundary and lands on a
+         * later turn of the loop, never on the next microtask. A stub that answers
+         * instantly hides every «who else ran while we were loading» bug, which is
+         * the whole class the scheduler's hydration belongs to.
+         */
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (Array.isArray(key)) {
+          const out: Record<string, unknown> = {};
+          for (const k of key) out[k] = sessionStore[k];
+          return out;
+        }
+        return { [key]: sessionStore[key] };
+      },
       set: async (obj: Record<string, unknown>) => {
         Object.assign(sessionStore, obj);
       },

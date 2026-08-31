@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { parseListingUrl } from "../src/content/features/listing";
-import { describeLiquidity, judgePrice } from "../src/content/features/listing/verdict";
+import {
+  describeDemand,
+  describeLiquidity,
+  describeNoListings,
+  judgePrice,
+} from "../src/content/features/listing/verdict";
 import type { HistoryStats } from "../src/steam/pricehistory";
 
 function stats(overrides: Partial<HistoryStats> = {}): HistoryStats {
@@ -12,10 +17,13 @@ function stats(overrides: Partial<HistoryStats> = {}): HistoryStats {
     lastAt: Date.now(),
     average7d: 10000,
     average30d: 10000,
+    average365d: 10000,
     min30d: 8000,
     max30d: 12000,
     volume7d: 20,
     volume30d: 90,
+    volume365d: 900,
+    spanDays: 400,
     ...overrides,
   };
 }
@@ -114,5 +122,73 @@ describe("parseListingUrl", () => {
     assert.equal(parseListingUrl("/market/mylistings"), null);
     assert.equal(parseListingUrl("/market/listings/730/"), null);
     assert.equal(parseListingUrl("/market/search"), null);
+  });
+});
+
+describe("describeDemand", () => {
+  /** Kopecks, so the numbers read like the live captures they came from. */
+  const money = (c: number | null): string => (c == null ? "—" : `${(c / 100).toFixed(2)} R`);
+
+  it("names both sides, the spread and how many stand on each", () => {
+    /** Fracture Case, measured live: 62,05 against 62,50 and a very deep book. */
+    const line = describeDemand(
+      { hash: "Fracture Case", maxBuy: 6205, minSell: 6250, buyOrders: 3_815_419, sellOrders: 176_590 },
+      money
+    );
+    assert.ok(line.includes("62.05 R"), line);
+    assert.ok(line.includes("62.50 R"), line);
+    assert.ok(line.includes("0.45 R"), line);
+    assert.ok(line.includes("3815419"), line);
+  });
+
+  it("gives the spread as a share too, because money alone says nothing", () => {
+    /**
+     * Both of these are 18 kopecks apart. On the rifle that is a rounding error
+     * and on the sticker it is a fifth of the price, and a line that printed only
+     * «разница 0,18 R» would read identically for the two.
+     */
+    const rifle = describeDemand(
+      { hash: "a", maxBuy: 1_510_670, minSell: 1_510_688, buyOrders: 2641, sellOrders: 74 },
+      money
+    );
+    const sticker = describeDemand(
+      { hash: "b", maxBuy: 82, minSell: 100, buyOrders: 5, sellOrders: 60 },
+      money
+    );
+    assert.ok(rifle.includes("<0,1%"), rifle);
+    assert.ok(sticker.includes("18%"), sticker);
+  });
+
+  it("says nobody is bidding rather than showing a price of zero", () => {
+    const line = describeDemand(
+      { hash: "a", maxBuy: null, minSell: 5000, buyOrders: 0, sellOrders: 12 },
+      money
+    );
+    assert.ok(line.includes("никто не выставил"), line);
+    assert.ok(!line.includes("0.00"), line);
+  });
+
+  it("says nothing at all when the page shipped no order book", () => {
+    assert.equal(describeDemand(null, money), "");
+  });
+});
+
+describe("describeNoListings", () => {
+  it("asks for the button only before it has been pressed", () => {
+    assert.match(describeNoListings(false, null), /Нажми/);
+    assert.doesNotMatch(describeNoListings(true, 1200), /Нажми/);
+    assert.doesNotMatch(describeNoListings(true, null), /Нажми/);
+  });
+
+  it("separates «Steam sent no rows for this wear» from «nothing is for sale»", () => {
+    /**
+     * The first is the normal state of a grouped page — measured live, the twenty
+     * rows Steam ships for the Redline group hold no Minimal Wear at all while the
+     * page is focused on Minimal Wear — and the panel has a real price for it.
+     * The second is a genuinely empty market. Telling a holder the wrong one is
+     * telling them their item cannot be sold.
+     */
+    assert.match(describeNoListings(true, 1_510_688), /только цену/);
+    assert.match(describeNoListings(true, null), /не нашлось/);
   });
 });

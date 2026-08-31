@@ -917,3 +917,12 @@ by the visible row count, so a small page meant small pages all the way down a
 that costs eight. A regression earns a test, not just a fix: the walk now always
 asks Steam for 100, and one test pins the count in the URL, one pins the request
 budget, one keeps the single-page account on one request.
+
+Continued in the same release after a design pass: the walk now counts
+(`200 из 727`) instead of an eternal «дочитываю», mylistings joined the
+listings budget (10/min — same endpoint family, same rate Steam itself
+sees), and the status line pulses while paced so a held request is visibly
+waiting and not dying. On tiles the wear chip moved above the price badge:
+Steam counts stacks in the top corner and the two were fighting for it.
+The panel got the rest of its own skin — themed scrollbar, focus rings,
+tabular numbers, a muted wear chip so five greens are one voice.

@@ -133,6 +133,17 @@
 
 .stw-status[data-kind="work"] {
   color: #66c0f4;
+  animation: stw-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes stw-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
 }
 
 .stw-body {
@@ -425,12 +436,13 @@
   position: absolute;
   left: 2px;
   right: 2px;
-  top: 2px;
+  /** Above the price badge, not over the stack count Steam puts top-right. */
+  bottom: 18px;
   z-index: 5;
   padding: 1px 2px;
   border-radius: 2px;
   background: rgba(11, 17, 24, 0.72);
-  color: #72cf41;
+  color: #c7d5e0;
   font: 700 10px/1.2 "Motiva Sans", Arial, sans-serif;
   text-align: center;
   text-shadow: 0 1px 0 #000;
@@ -617,3 +629,31 @@
 .stw-ladder-d[data-level="warn"] {
   color: #e4b85c;
 }
+/* A themed scrollbar; the default one reads like a different application. */
+.stw-rows::-webkit-scrollbar {
+  width: 8px;
+}
+
+.stw-rows::-webkit-scrollbar-thumb {
+  background: #2a475e;
+  border-radius: 4px;
+}
+
+.stw-rows::-webkit-scrollbar-thumb:hover {
+  background: #3d6c8d;
+}
+
+/* Keyboard users have to see where they are. */
+.stw-btn:focus-visible,
+.stw-tab:focus-visible,
+.stw-iconbtn:focus-visible,
+.stw-input:focus-visible,
+.stw-select:focus-visible {
+  outline: 2px solid #66c0f4;
+  outline-offset: 1px;
+}
+
+.stw-stat-n {
+  font-variant-numeric: tabular-nums;
+}
+

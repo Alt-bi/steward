@@ -2,6 +2,7 @@ import { levelLabel, PRICE_LEVELS, type PriceLevel } from "../../../core/levels"
 import { send } from "../../../core/messaging";
 import { loadFlag, loadPref, savePref } from "../../../core/prefs";
 import { formatCents } from "../../../core/money";
+import { csvDoc, downloadCsv } from "../../../core/csv";
 import { noneDropped, pickAll, pickNone, togglePick, type Picks } from "../../../core/picks";
 import { loadSettings, type Settings } from "../../../core/settings";
 import type { Cents, ItemKeyed, Listing, RepricePlan } from "../../../core/types";
@@ -248,7 +249,13 @@ async function mount(ctx: FeatureContext): Promise<void> {
   historyBtn.title =
     "Спрашивает у Steam, по каким ценам предмет продавался. Самый медленный запрос — " +
     "около 6 в минуту — но ответ живёт часами.";
-  levelRow.append(levelSelect, historyBtn);
+  const csvBtn = el("button", "stw-btn stw-btn-thin", "CSV");
+  csvBtn.type = "button";
+  csvBtn.title =
+    "Сохранить отфильтрованный список таблицей: что стоит, за сколько, почему и что делать. Открывается в Excel.";
+  csvBtn.addEventListener("click", () => exportCsv());
+
+  levelRow.append(levelSelect, historyBtn, csvBtn);
 
   const movableLabel = el("label", "stw-toggle");
   movableLabel.title = "Оставить только те лоты, которые план собирается переставить";
@@ -359,6 +366,36 @@ async function mount(ctx: FeatureContext): Promise<void> {
   /** The rows on screen: the filter and the sort decide, nothing else. */
   function currentViews(): RepricePlan[] {
     return viewPlans(state.plans, state.filters, state.sort);
+  }
+
+  /**
+   * The filtered plan as a spreadsheet. This is the sheet the user asked the
+   * scan to produce: verdict, price, reason — not a raw dump.
+   */
+  function exportCsv(): void {
+    const views = currentViews();
+    if (!views.length) {
+      status("Экспортировать нечего — сначала «Сканировать страницу».", "warn");
+      return;
+    }
+    const rows = views.map((plan) => [
+      plan.name,
+      plan.hash,
+      plan.amount,
+      money(plan.ourBuyer),
+      money(plan.competitorBuyer),
+      money(plan.targetBuyer),
+      plan.action === "reprice" ? "переставить" : "пропуск",
+      plan.reason,
+    ]);
+    downloadCsv(
+      `steward-reprice-${new Date().toISOString().slice(0, 10)}.csv`,
+      csvDoc(
+        ["Предмет", "market_hash_name", "Кол-во", "Наша цена", "Чужой мин", "Цель", "Действие", "Почему"],
+        rows
+      )
+    );
+    status(`CSV: ${views.length} лотов выгружено.`, "ok");
   }
 
   /** Overpriced, still live, still ticked — exactly what «Переставить» will move. */

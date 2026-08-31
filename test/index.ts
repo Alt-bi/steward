@@ -19,6 +19,7 @@ import "./page-context.test";
 import "./reprice-view.test";
 import "./buyorders.test";
 import "./floats.test";
+import "./csv.test";
 import "./badges.test";
 import "./pricehistory.test";
 import "./listing-verdict.test";

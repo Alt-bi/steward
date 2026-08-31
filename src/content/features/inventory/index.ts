@@ -1,4 +1,5 @@
 import { formatCents } from "../../../core/money";
+import { csvDoc, downloadCsv } from "../../../core/csv";
 import { loadSettings, saveSettings, type Settings } from "../../../core/settings";
 import { clampSellSettings, type SellStrategy } from "../../../core/sell";
 import type { Cents, ItemKeyed } from "../../../core/types";
@@ -191,7 +192,13 @@ async function mount(ctx: FeatureContext): Promise<void> {
     "Нужна для «по средней». Самый медленный запрос Steam — около 6 в минуту, " +
     "зато ответ живёт часами.";
 
-  controls.append(strategySelect, amountInput, perItemInput, historyBtn);
+    const csvBtn = el("button", "stw-btn stw-btn-thin", "CSV");
+  csvBtn.type = "button";
+  csvBtn.title =
+    "Сохранить то, что видно, таблицей: предмет, кол-во, цена, износ. Открывается в Excel.";
+  csvBtn.addEventListener("click", () => exportCsv());
+
+  controls.append(strategySelect, amountInput, perItemInput, historyBtn, csvBtn);
 
   /**
    * Filtering and sorting are what turn a page of two hundred stacks into a
@@ -452,6 +459,31 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
     row.append(label, prices, whyRow);
     return row;
+  }
+
+  /**
+   * What the user can see, as a spreadsheet — the filter and sort already ran,
+   * the export is the table, not the raw scan.
+   */
+  function exportCsv(): void {
+    const views = currentViews();
+    if (!views.length) {
+      status("Экспортировать нечего — сначала «Сканировать».", "warn");
+      return;
+    }
+    const rows = views.map((view) => [
+      view.group.name,
+      view.group.hash,
+      view.group.count,
+      money(view.low),
+      money(view.value),
+      wearOf(view.group),
+    ]);
+    downloadCsv(
+      `steward-inventory-${new Date().toISOString().slice(0, 10)}.csv`,
+      csvDoc(["Предмет", "market_hash_name", "Копий", "Низ рынка", "Стек стоит", "Wear"], rows)
+    );
+    status(`CSV: ${views.length} строк выгружено.`, "ok");
   }
 
   function renderRows(): void {

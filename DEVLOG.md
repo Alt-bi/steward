@@ -878,3 +878,18 @@ easy way to hide a missing page.
 
 `seen` is now part of `MyListingsPage`: the same set `complete` is measured
 against, which the walk needs to tell "new" from "again".
+
+## 2.24.0 — every scan is also a spreadsheet
+
+727 lots with verdicts are worth more in Excel than
+on a screen. `core/csv.ts` builds RFC 4180 documents: a BOM or Excel reads
+"AK-47" as mojibake, quoting or a comma inside a market name splits one row
+in two, and the row break has to be CRLF for the same Excel. Quoting is built
+from char codes — this repo's file-writing pipeline has eaten escape sequences
+twice, and a test file that will not compile is how that gets caught.
+
+The Reprice button exports the filtered plan (name, hash, qty, our price, the
+competitor's low, the target, action, reason); the Inventory button exports the
+filtered stacks with float ranges where Steam gave them. Both export what is on
+screen after filters, not everything — the row the user can see is the row they
+export.

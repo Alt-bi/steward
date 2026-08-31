@@ -400,8 +400,16 @@ export function myListingsFrom(data: MyListingsResponse): MyListingsPage {
  * page size, and it turned out to be the cost of the whole walk: ten rows
  * on screen meant ten lots a page, and a 727-lot account crawled for 73
  * paced requests — a spinner that never ends on a scan that costs eight.
+ *
+ * `onProgress` exists for the same honesty reason: a walk of several pages
+ * takes tens of seconds at Steam's pace, and a spinner that says nothing
+ * reads exactly like a spinner stuck forever. It gets how far the walk is.
  */
-export async function fetchMyListings(_visibleCount: number, pacing: Pacing): Promise<MyListingsPage> {
+export async function fetchMyListings(
+  _visibleCount: number,
+  pacing: Pacing,
+  onProgress?: (seen: number, total: number) => void
+): Promise<MyListingsPage> {
   const size = 100;
   const first = await myListingsPage(0, size, pacing);
   if (first.page.complete || !first.expectMore) return first.page;
@@ -409,6 +417,7 @@ export async function fetchMyListings(_visibleCount: number, pacing: Pacing): Pr
   /** Steam's own pages, however many it says there are. */
   const total = first.total;
   const seen = new Set(first.page.seen ?? first.page.ids);
+  onProgress?.(seen.size, total);
   const page: MyListingsPage = {
     refs: new Map(first.page.refs),
     ids: new Set(first.page.ids),
@@ -436,6 +445,7 @@ export async function fetchMyListings(_visibleCount: number, pacing: Pacing): Pr
     for (const [id, ref] of next.page.refs) if (!page.refs.has(id)) page.refs.set(id, ref);
     /** A page that said "100 more" and brought nothing new is Steam being done. */
     if (!next.expectMore || fresh === 0) break;
+    onProgress?.(seen.size, total);
   }
 
   page.complete = first.expectMore && seen.size >= total;

@@ -34,8 +34,13 @@ const LIMITS: Record<NetKind, Budget> = {
   search: { ratePerMin: 20, capacity: 4, minRatePerMin: 4 },
   listings: { ratePerMin: 10, capacity: 2, minRatePerMin: 3 },
   history: { ratePerMin: 6, capacity: 1, minRatePerMin: 2 },
-  /** One call per scan, only when the page hid the asset references. */
-  mylistings: { ratePerMin: 6, capacity: 2, minRatePerMin: 2 },
+  /**
+   * One call per scan for a small account, and since 2.23.0 a walk of up to
+   * eight pages for a big one. 6/min made a 727-lot walk crawl for 80 seconds
+   * of waiting — the same shape is used by `listings`, which always sits at
+   * 10/min, and Steam meters the IP, not the path.
+   */
+  mylistings: { ratePerMin: 10, capacity: 3, minRatePerMin: 3 },
   inventory: { ratePerMin: 10, capacity: 2, minRatePerMin: 3 },
   /** Item classes never change, so every one of these is paid for exactly once. */
   description: { ratePerMin: 20, capacity: 5, minRatePerMin: 4 },

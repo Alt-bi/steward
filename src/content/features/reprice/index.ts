@@ -835,7 +835,9 @@ async function mount(ctx: FeatureContext): Promise<void> {
           "work"
         );
         try {
-          const mine = await fetchMyListings(listings.length, pacing);
+          const mine = await fetchMyListings(listings.length, pacing, (seen, total) => {
+            status(`Дочитываю свои лоты ${seen} из ${total}…`, "work");
+          });
           applyAssetRefs(listings, mine.refs);
           for (const id of mine.ids) state.ourIds.add(id);
           state.ownershipComplete = mine.complete;

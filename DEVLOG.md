@@ -743,3 +743,27 @@ results already fetched for prices
 That is enough to restore exact competitor checks for CS. It needs a persistent
 store for group ids and filters — the IndexedDB price cache holds numbers only —
 and plumbing through search → prices → reprice, which is a feature, not a fix.
+## End-to-end replay on a live account (2026-08-31)
+
+The whole SIH pipeline was replayed in-page through CDP on the signed-in
+bot tab — same fetches, same selectors, the extension itself never
+launched — and the two independent sources of one number were cross-checked.
+
+- `mylistings` still answers the JSON envelope of 2026-08-29: 729 active,
+  100 rows in `results_html`, prices in the nested-span shape under
+  `market_listing_my_price` (no `price_with_fee` classes present at all).
+  The fallback chain in `pricesFromListingRow` priced 100 of 100 rows;
+  the chain is load-bearing now, not a backup.
+- Non-grouped TF2 foils: the book answers by the href name as-is, id-prefix
+  included (`489260-Rock Golem (Foil)`) — total 1, `bMine` true, and the
+  books unPrice+unFee (8127) equals the DOM sell price (81.27 RUB) to the
+  cent. Two sources, one number. The grouped path stays proven by the
+  AK gid above.
+- Observation, not a defect: two foil listings active in `mylistings` were
+  absent from their book (`bMine` false) — consistent with the twenty-four-
+  hour hold on fresh listings. Ownership comes from `mylistings` ids, not
+  `bMine`, so the scan still cannot undercut a hidden self.
+- Probe caution: ru-RU locale money is `81,27 руб.` — a naive digit-glue
+  probe reads 8127 as 81277068 and invents a parser bug. The real parser
+  tokenizes by MONEY_TOKEN; do not trust quick probes on money text.
+

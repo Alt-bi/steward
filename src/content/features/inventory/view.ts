@@ -10,7 +10,7 @@ import type { InventoryGroup } from "../../../steam/inventory";
  * renders what comes back.
  */
 
-export type SortKey = "value" | "price" | "count" | "name";
+export type SortKey = "value" | "price" | "count" | "name" | "wear";
 
 export interface ViewFilters {
   /** Substring of the display name or the hash. Case and spacing are ignored. */
@@ -35,6 +35,12 @@ export interface GroupView {
   value: Cents;
   /** Copies of this stack the market will accept. */
   sellable: number;
+  /**
+   * Float across the stack — min when every copy measured, otherwise null.
+   * Only present where Steam gave wear; absent sorts last, never as zero
+   * (unmeasured is not "no wear").
+   */
+  float: number | null;
 }
 
 /** Names are compared the way a person reads them: no case, no double spaces. */
@@ -60,13 +66,35 @@ export function sellableCount(group: InventoryGroup): number {
   return n;
 }
 
-function toView(group: InventoryGroup, lows: Record<string, Cents | null>): GroupView {
+/** Wear across a stack: min of measured floats, null unless the whole stack spoke. */
+function stackFloat(
+  group: InventoryGroup,
+  floatOf: ((assetid: string) => number | null) | null
+): number | null {
+  if (!floatOf) return null;
+  let min: number | null = null;
+  let measured = 0;
+  for (const item of group.items) {
+    const f = floatOf(item.assetid);
+    if (f == null) continue;
+    measured += item.amount;
+    if (min == null || f < min) min = f;
+  }
+  return measured >= group.count ? min : null;
+}
+
+function toView(
+  group: InventoryGroup,
+  lows: Record<string, Cents | null>,
+  floatOf: ((assetid: string) => number | null) | null = null
+): GroupView {
   const low = lows[group.key] ?? null;
   return {
     group,
     low,
     value: low == null ? 0 : low * group.count,
     sellable: sellableCount(group),
+    float: stackFloat(group, floatOf),
   };
 }
 
@@ -79,6 +107,14 @@ function compare(a: GroupView, b: GroupView, sort: SortKey): number {
   const byName = a.group.name.localeCompare(b.group.name);
   if (sort === "name") return byName || a.group.key.localeCompare(b.group.key);
   if (sort === "count") return b.group.count - a.group.count || byName;
+  if (sort === "wear") {
+    /**
+     * Wear ranks on wear alone: whether a stack is priced is a different
+     * question. A float nobody measured sinks — unknown, not a pristine 0.00.
+     */
+    const wf = (v: GroupView) => (v.float == null ? Number.POSITIVE_INFINITY : v.float);
+    return wf(a) - wf(b) || byName;
+  }
 
   const known = (v: GroupView) => (v.low == null ? 0 : 1);
   const rank = known(b) - known(a);
@@ -92,13 +128,14 @@ export function viewGroups(
   groups: Map<string, InventoryGroup> | Iterable<InventoryGroup>,
   lows: Record<string, Cents | null>,
   filters: ViewFilters = DEFAULT_FILTERS,
-  sort: SortKey = "value"
+  sort: SortKey = "value",
+  floatOf: ((assetid: string) => number | null) | null = null
 ): GroupView[] {
   const source = groups instanceof Map ? groups.values() : groups;
   const out: GroupView[] = [];
   for (const group of source) {
     if (!matchesQuery(group, filters.query)) continue;
-    const view = toView(group, lows);
+    const view = toView(group, lows, floatOf);
     if (filters.onlyMarketable && view.sellable < 1) continue;
     if (filters.onlyPriced && view.low == null) continue;
     out.push(view);

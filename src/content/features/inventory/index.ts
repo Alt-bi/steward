@@ -218,6 +218,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     ["price", "дороже за штуку"],
     ["count", "больше штук"],
     ["name", "по названию"],
+    ["wear", "меньше износ (float)"],
   ] as const) {
     const option = document.createElement("option");
     option.value = value;
@@ -379,7 +380,10 @@ async function mount(ctx: FeatureContext): Promise<void> {
   }
 
   function currentViews(): GroupView[] {
-    return viewGroups(state.groups, state.lows, state.filters, state.sort);
+    return viewGroups(state.groups, state.lows, state.filters, state.sort, (assetid) => {
+      const wear = state.wears.get(assetid);
+      return wear ? wear.float : null;
+    });
   }
 
   /** Every copy that is priced, marketable and still ticked. */

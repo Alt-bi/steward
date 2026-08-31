@@ -254,3 +254,65 @@ describe("selection", () => {
     assert.deepEqual([...picked], ["7", "8"], "the new stack is picked, the dropped one is not");
   });
 });
+
+describe("viewGroups — wear sorting", () => {
+  const fn1 = group("AK-47 | FN", [item("a")]);
+  const mw1 = group("AK-47 | MW", [item("b")]);
+  const caseStack = group("Chroma Case", [item("c", true, 5)]);
+
+  function floats(f: Record<string, number>) {
+    return (assetid: string) => (f[assetid] === undefined ? null : f[assetid]);
+  }
+
+  it("orders by float ascending and sinks the unmeasured", () => {
+    const views = viewGroups(
+      table(mw1, fn1, caseStack),
+      {},
+      filters(),
+      "wear",
+      floats({ a: 0.03, b: 0.18 })
+    );
+    assert.deepEqual(
+      views.map((v) => v.group.name),
+      ["AK-47 | FN", "AK-47 | MW", "Chroma Case"]
+    );
+    assert.equal(views[0]!.float, 0.03);
+    assert.equal(views[2]!.float, null, "no wear is not float 0");
+  });
+
+  it("a half-measured stack has no stack float and sinks", () => {
+    /** One copy read, the other not: min would claim the whole stack is 0.01. */
+    const two = group("Two copies", [item("x"), item("y")]);
+    const one = group("One copy", [item("z")]);
+    const views = viewGroups(table(two, one), {}, filters(), "wear", floats({ x: 0.01, z: 0.5 }));
+    assert.deepEqual(
+      views.map((v) => v.group.name),
+      ["One copy", "Two copies"]
+    );
+  });
+
+  it("without any wear the order falls back to name, not randomness", () => {
+    const views = viewGroups(table(chroma, redline), lows, filters(), "wear");
+    assert.deepEqual(
+      views.map((v) => v.group.name),
+      ["AK-47 | Redline", "Chroma Case"]
+    );
+  });
+
+  it("wear sort ignores whether the stack is priced", () => {
+    const cheap = group("Cheap FN", [item("p")]);
+    const unpriced = group("Priced MW", [item("q")]);
+    const views = viewGroups(
+      table(unpriced, cheap),
+      { [cheap.key]: 100, [unpriced.key]: null },
+      filters(),
+      "wear",
+      floats({ p: 0.4, q: 0.05 })
+    );
+    assert.deepEqual(
+      views.map((v) => v.group.name),
+      ["Priced MW", "Cheap FN"],
+      "wear ranks on wear alone"
+    );
+  });
+});

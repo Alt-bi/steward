@@ -893,3 +893,18 @@ competitor's low, the target, action, reason); the Inventory button exports the
 filtered stacks with float ranges where Steam gave them. Both export what is on
 screen after filters, not everything — the row the user can see is the row they
 export.
+
+## 2.25.0 — wear is a sort key, not just a chip
+
+Once every CS copy has a float, the question on a trading desk is
+"which of these 300 skins is the cleanest" — and the answer was three clicks deep.
+The sort gained "float ascending": a stack with no reading sinks (unknown is
+not pristine 0.00), and a stack where only some copies were measured also sinks,
+because min-of-measured would otherwise claim a half-read stack is pristine.
+Wear ranks on wear alone — whether a stack is priced is a different question,
+and mixing the two rankings buried clean unpriced stacks under junk.
+
+The whole cycle in three releases: mylistings now walks every page (ownership is
+complete on a 727-lot account, and the self-undercut guard finally sees all of
+our lots), every scan and inventory export hands Excel a sheet with a BOM and
+RFC 4180 quoting, and the float column sorts the shelf like a shop.

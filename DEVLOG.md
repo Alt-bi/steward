@@ -908,3 +908,12 @@ The whole cycle in three releases: mylistings now walks every page (ownership is
 complete on a 727-lot account, and the self-undercut guard finally sees all of
 our lots), every scan and inventory export hands Excel a sheet with a BOM and
 RFC 4180 quoting, and the float column sorts the shelf like a shop.
+
+## 2.25.1 — the endless spinner, killed by its own page size
+
+Ten lots on screen, 'дочитываю…' forever. Mine from 2.23.0: the walk sized its pages
+by the visible row count, so a small page meant small pages all the way down a
+727-lot account — 73 paced requests, roughly six minutes of spinning for a scan
+that costs eight. A regression earns a test, not just a fix: the walk now always
+asks Steam for 100, and one test pins the count in the URL, one pins the request
+budget, one keeps the single-page account on one request.

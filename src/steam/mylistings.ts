@@ -394,9 +394,15 @@ export function myListingsFrom(data: MyListingsResponse): MyListingsPage {
  * bidding against ourselves, so the few requests are worth it. The walk stops
  * on its own: it only continues while pages keep bringing new ids, so an
  * account that fits in one answer pays exactly one request.
+ *
+ * The page size is Steam's biggest, never the count from the visible rows.
+ * The first release of the walk passed the on-page row count through as the
+ * page size, and it turned out to be the cost of the whole walk: ten rows
+ * on screen meant ten lots a page, and a 727-lot account crawled for 73
+ * paced requests — a spinner that never ends on a scan that costs eight.
  */
-export async function fetchMyListings(count: number, pacing: Pacing): Promise<MyListingsPage> {
-  const size = Math.min(100, Math.max(10, count));
+export async function fetchMyListings(_visibleCount: number, pacing: Pacing): Promise<MyListingsPage> {
+  const size = 100;
   const first = await myListingsPage(0, size, pacing);
   if (first.page.complete || !first.expectMore) return first.page;
 

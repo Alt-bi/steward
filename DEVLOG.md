@@ -995,3 +995,41 @@ test reading a refusal hidden inside a 200.
 dropsDelta diffs two scans: which appids dropped how many. The tab keeps the
 last counts and, on rescan, says what landed - the only proof farming
 works is Steam counting fewer drops, and now the panel shows it.
+
+## 2.28.0 — the chat client is the engine (no server, no bot)
+
+The user pointed at SteamLVLUP's Card Factory: «у меня всё прекрасно
+работает из расширения, надо понять как это реализовать». We read their
+shipped bundle (v2.1.7) end to end. Their trick: the /chat page carries a
+live CM websocket; their content script asks THEIR server to encode a
+CMsgClientGamesPlayed packet and shoves the finished bytes into
+g_FriendsUIApp.m_CMInterface.m_Socket.send. Steam trusts the socket — it is
+the account's own authenticated connection.
+
+We do the same minus their server:
+- src/page/cm-play-core.ts — hand-rolled protobuf (varint/fixed64) for
+  exactly one message, CMsgClientGamesPlayed. Field layout from Valve's own
+  steammessages_clientserver.proto (game_id is field 2 fixed64 — an early
+  guess had it wrong, a live frame capture set us straight). Header
+  byte-for-byte matches the chat's own frames (test asserts it against a
+  captured frame).
+- src/page/cm-play-bridge.ts (MAIN, /chat) — encodes, sends, keeps alive
+  every 25s like SLVLUP's ping loop, and passively captures every 742 frame
+  the socket sends (ours tagged mine:true), so golden frames from other
+  extensions land in our ring for byte comparison.
+- src/content/chat-relay.ts (ISOLATED) + worker "cm/play" — the Cards tab
+  talks to the chat tab through the worker; no tab open, the button says so.
+- The tab gained mode «чат-клиент — поток до 32 игр, без ботов».
+
+Honest status of the proof: our frame is accepted by the socket and matches
+the chat's own header bytes exactly, but on the bot profile we could not yet
+observe the public profile flip to In-Game from our packet alone (the
+friends-summary oracle needs a sessionid the web UI no longer exposes, and
+the profile page kept showing «Currently Online»). SLVLUP's own Start on a
+fresh profile pushed only a persona change (703) through the same socket —
+their games-played bytes come from their server and did not arrive on an
+unprovisioned profile. So this release is the engine plus the capture ring:
+press Start once in their UI on the working profile and Steward saves their
+real 742 bytes into the session ring; comparing theirs against ours, byte
+for byte, closes the gap with evidence, not guesses. steam://run remains the
+zero-doubt path meanwhile.

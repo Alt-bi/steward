@@ -6,6 +6,7 @@ import {
   togglePick,
   type Picks,
 } from "../../../core/picks";
+import { send } from "../../../core/messaging";
 import {
   batchesOf,
   loadAsfConfig,
@@ -57,12 +58,15 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
   const modeSelect = el("select", "stw-input");
   modeSelect.append(
+    new Option("чат-клиент — поток до 32 игр, без ботов", "chat"),
     new Option("steam://run — по одной, через клиент", "run"),
-    new Option("ASF-бот — поток до 32 игр", "asf")
+    new Option("ASF-бот — играть будет бот", "asf")
   );
   modeSelect.title =
-    "steam://run: твой Steam клиент играет игры по очереди, подтверждая каждую.\n" +
-    "ASF-бот: SteamKit-бот играет все выбранные сразу — так работает Card Factory.";
+    "чат-клиент: держи вкладку steamcommunity.com/chat открытой — игры заявляются в её"
+    "  собственное соединение со Steam (тот же приём, что у Card Factory, движок — наш).\n"
+    "steam://run: клиент играет по очереди, подтверждая каждую.\n"
+    "ASF-бот: SteamKit-бот играет все выбранные сразу.";
 
   const launchBtn = el("button", "stw-btn", "Запустить");
   launchBtn.type = "button";
@@ -71,6 +75,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     "В режиме ASF-бота ставит игры в поток боту — до 32 сразу.";
 
   const stopBtn = el("button", "stw-btn stw-btn-thin", "стоп");
+  const snapBtn = el("button", "stw-btn stw-btn-thin", "снимок 742");
   stopBtn.type = "button";
   stopBtn.title = "Вернуть бота в обычный режим (reset) — дропы больше не фармятся";
   stopBtn.style.display = "none";
@@ -98,7 +103,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   asfBox.append(urlInput, passInput, botInput, testBtn, saveBtn);
 
   const head = el("div", "stw-controls");
-  head.append(scanBtn, allBtn, noneBtn, modeSelect, launchBtn, stopBtn);
+  head.append(scanBtn, allBtn, noneBtn, modeSelect, launchBtn, stopBtn, snapBtn);
 
   const stats = el("div", "stw-stats");
   const statNodes: Record<string, HTMLElement> = {};
@@ -213,7 +218,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   modeSelect.addEventListener("change", () => {
     const bot = modeSelect.value === "asf";
     asfBox.style.display = bot ? "" : "none";
-    stopBtn.style.display = bot ? "" : "none";
+    stopBtn.style.display = bot || modeSelect.value === "chat" ? "" : "none";
   });
 
   saveBtn.addEventListener("click", () => {
@@ -232,6 +237,12 @@ async function mount(ctx: FeatureContext): Promise<void> {
     if (busy) return;
     busy = true;
     void (async () => {
+      if (modeSelect.value === "chat") {
+        const r = await send("cm/play", { stop: true, entries: [] });
+        status(r.ok ? "Заявка снята — чат больше не «играет»" : "Чат не ответил", r.ok ? "ok" : "err");
+        busy = false;
+        return;
+      }
       const r = await runAsfCommands(asfCfg(), stopCommands(asfCfg()));
       status(
         r.failed ? `Стоп не прошёл: ${r.failed}` : "Бот вернулся в обычный режим",
@@ -246,6 +257,24 @@ async function mount(ctx: FeatureContext): Promise<void> {
     const chosen = appIds.filter((id) => isPicked(id, dropped));
     if (!chosen.length) {
       status("Отметь игры, которые запускаем", "warn");
+      return;
+    }
+    if (modeSelect.value === "chat") {
+      busy = true;
+      status("Заявляем игры в чат-клиент…", "work");
+      void (async () => {
+        const r = await send("cm/play", {
+          stop: false,
+          entries: chosen.map((id) => ({ appid: Number(id), playing: true, secure: true, offline: false })),
+        });
+        status(
+          r.ok
+            ? `Заявлено ${chosen.length} — держи вкладку чата открытой`
+            : ("Чат не принял заявку: " + ("error" in r ? r.error : "?")),
+          r.ok ? "ok" : "err"
+        );
+        busy = false;
+      })();
       return;
     }
     if (modeSelect.value === "asf") {
@@ -285,6 +314,27 @@ async function mount(ctx: FeatureContext): Promise<void> {
       }
       status(`Запущено ${chosen.length} шт. Дропы придут с наигранным временем`, "ok");
       busy = false;
+    })();
+  });
+
+  snapBtn.title =
+    "Показывает сохранённые кадры 742 (ClientGamesPlayed), которые видел любой открытый чат:\n" +
+    "наши заявки и чужие (например из Card Factory) — для побайтового сравнения движков.";
+  snapBtn.addEventListener("click", () => {
+    void (async () => {
+      const ring = await send("cm/golden", {});
+      if (!ring.frames.length) {
+        status("Кольцо пусто — открой чат и нажми Start где-нибудь, либо заявку отсюда", "warn");
+        return;
+      }
+      const foreign = ring.frames.filter((f) => !f.mine);
+      const mine = ring.frames.filter((f) => f.mine);
+      const sample = (foreign[0] || mine[0])!;
+      const shown = sample.bytes.slice(0, 24).map((b) => b.toString(16).padStart(2, "0")).join(" ");
+      status(
+        `Кадры: своих ${mine.length}, чужих ${foreign.length}. Первый байт-в-байт: ${shown}…`,
+        foreign.length ? "ok" : "warn"
+      );
     })();
   });
 

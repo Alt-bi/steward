@@ -23,6 +23,7 @@ const options = {
     { in: "src/content/index.ts", out: "content" },
     { in: "src/page/bridge.ts", out: "page-bridge" },
     { in: "src/page/trade-bridge.ts", out: "trade-bridge" },
+    { in: "src/page/cm-play-bridge.ts", out: "cm-play-bridge" },
     { in: "src/popup/popup.ts", out: "popup" },
   ],
   outdir,

@@ -93,7 +93,25 @@ export interface Protocol {
     req: { url: string; password: string; command: string };
     res: { ok: true; value?: string; message?: string | null } | { ok: false; error: string };
   };
+  /**
+   * Drive the chat client's CM socket in a chat tab. The worker finds the
+   * tab, the tab's MAIN bridge encodes and sends; play/stop is an
+   * appid-boolean list so the same shape carries both.
+   */
+  "cm/play": {
+    req: { stop: boolean; entries: { appid: number; playing: boolean; secure: boolean; offline: boolean }[] };
+    res: { ok: true; sent: boolean } | { ok: false; error: string };
+  };
+  /** A MAIN-bridge captured 742 frame (ours or a golden one from another
+   * extension's Start press). The worker keeps a small ring in storage. */
+  "cm/capture": {
+    req: { bytes: number[]; mine: boolean };
+    res: { ok: true };
+  };
+  /** What the capture ring holds right now — the tab reads it to offer replay. */
+  "cm/golden": { req: Record<string, never>; res: { frames: { bytes: number[]; mine: boolean; at: number }[] } };
 }
+
 
 export type MsgType = keyof Protocol;
 

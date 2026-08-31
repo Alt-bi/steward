@@ -103,7 +103,43 @@ const handlers: Handlers = {
       clearTimeout(timer);
     }
   },
+  "cm/play": async (req) => {
+    // The chat tab's MAIN bridge encodes and pushes into the chat's own
+    // CM websocket; we only route. No tab, no trick — the chat must be open.
+    const tabs = await chrome.tabs.query({ url: CHAT_TAB_PATTERNS });
+    for (const tab of tabs) {
+      if (tab.id === undefined) continue;
+      try {
+        const reply = (await chrome.tabs.sendMessage(tab.id, { __cmrelay: true, payload: req })) as
+          | { ok?: boolean; note?: string }
+          | undefined;
+        if (reply && reply.ok) return { ok: true, sent: true };
+      } catch {
+        /* a chat tab without our content script (or asleep) — try the next */
+      }
+    }
+    return { ok: false, error: "чат не отвечает — открой steamcommunity.com/chat и обнови его" };
+  },
+  "cm/capture": async (req) => {
+    const key = "cmCaptured";
+    const prev = await chrome.storage.session.get(key);
+    const list: unknown[] = Array.isArray(prev[key]) ? (prev[key] as unknown[]) : [];
+    list.push({ ...req });
+    while (list.length > 8) list.shift();
+    await chrome.storage.session.set({ [key]: list });
+    return { ok: true };
+  },
+  "cm/golden": async () => {
+    const prev = await chrome.storage.session.get("cmCaptured");
+    const list = Array.isArray(prev.cmCaptured)
+      ? (prev.cmCaptured as { bytes: number[]; mine: boolean; at: number }[])
+      : [];
+    return { frames: list.slice(-8) };
+  },
 };
+
+/** Where the CM socket lives: the chat client itself. */
+const CHAT_TAB_PATTERNS = ["https://steamcommunity.com/chat/*", "https://steamcommunity.com/family/*"];
 
 serve(handlers);
 

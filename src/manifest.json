@@ -22,7 +22,8 @@
     "service_worker": "background.js"
   },
   "permissions": [
-    "storage"
+    "storage",
+    "tabs"
   ],
   "host_permissions": [
     "https://steamcommunity.com/*",
@@ -70,6 +71,27 @@
       ],
       "css": [
         "content.css"
+      ],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": [
+        "https://steamcommunity.com/chat/*",
+        "https://steamcommunity.com/family/*"
+      ],
+      "js": [
+        "cm-play-bridge.js"
+      ],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://steamcommunity.com/chat/*"
+      ],
+      "js": [
+        "content.js"
       ],
       "run_at": "document_idle",
       "world": "ISOLATED"

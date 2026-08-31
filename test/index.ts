@@ -21,6 +21,7 @@ import "./buyorders.test";
 import "./floats.test";
 import "./csv.test";
 import "./badges.test";
+import "./cm-play.test";
 import "./asf.test";
 import "./cards-scan.test";
 import "./pricehistory.test";

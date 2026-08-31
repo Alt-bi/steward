@@ -960,3 +960,32 @@ What landed is the half that is pure read:
 The run button deliberately stops at `steam://`: no fake progress bar. Launch
 emulation across 32 games is a SteamKit job, and docs/cards-factory.md keeps
 the ASF rung planned with its honest boundaries.
+
+## 2.27.0 — the Cards tab can drive a bot
+
+The badges page taught us the drop debt; this is the hand. Card Factory's trick
+— playing up to 32 games at once — is a Steam session protocol, and a browser
+extension cannot speak it. ArchiSteamFarm does, properly, over SteamKit2. The
+tab now dispatches to it.
+
+Everything about the bot contract was read out of ASF sources rather than
+guessed: `POST /Api/Command` takes `{Command}` and answers GenericResponse
+`{Success,Message,Result}`; the auth middleware lets loopback callers through
+without a password and 403s the rest; `play <appids>` is manual farming,
+`reset` hands the bots back. A refused play still arrives as HTTP 200 — the
+verdict is inside the text, so `runAsfCommands` sniffs it.
+
+The fetch runs in the worker, not the page: the badges page has no CORS
+dealings with a local bot, ASF answers no preflight, and the worker holds the
+loopback host permission outright (`asf/exec`). The password rides the query
+per ASF's own middleware and is never logged.
+
+Two modes, one button: `steam://run` hands games to the local client one by
+one with the client's own confirmations, and ASF mode puts the whole selection
+into the bot in 32-game batches. `тест` asks `status` before anything gets
+queued; `стоп` resets the bot.
+
+The evening's own bug, caught by its own tests: a heredoc can eat a
+backslash so `\b` lands in the file as byte 0x08 — esbuild saw a literal
+backspace in the regex. Now the pattern is a named constant, and there is a
+test reading a refusal hidden inside a 200.

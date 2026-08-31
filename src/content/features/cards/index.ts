@@ -6,6 +6,15 @@ import {
   togglePick,
   type Picks,
 } from "../../../core/picks";
+import {
+  batchesOf,
+  loadAsfConfig,
+  playCommands,
+  probeAsf,
+  runAsfCommands,
+  saveAsfConfig,
+  stopCommands,
+} from "../../../core/asf";
 import { farmableRows, scanBadges } from "../../../steam/badges";
 import { allowSteamTraffic, sleep } from "../../../steam/net";
 import { describeError } from "../../ui/errors";
@@ -44,14 +53,50 @@ async function mount(ctx: FeatureContext): Promise<void> {
   const noneBtn = el("button", "stw-btn stw-btn-thin", "снять");
   noneBtn.type = "button";
 
-  const launchBtn = el("button", "stw-btn", "Запустить в Steam");
+  const modeSelect = el("select", "stw-input");
+  modeSelect.append(
+    new Option("steam://run — по одной, через клиент", "run"),
+    new Option("ASF-бот — поток до 32 игр", "asf")
+  );
+  modeSelect.title =
+    "steam://run: твой Steam клиент играет игры по очереди, подтверждая каждую.\n" +
+    "ASF-бот: SteamKit-бот играет все выбранные сразу — так работает Card Factory.";
+
+  const launchBtn = el("button", "stw-btn", "Запустить");
   launchBtn.type = "button";
   launchBtn.title =
     "По одной игре через steam://run: клиент спросит подтверждение, играет, карточка капает с наигранным временем.\n" +
-    "Поток из 32 игр — забота SteamKit-бота (docs/cards-factory.md), браузер его не заменит.";
+    "В режиме ASF-бота ставит игры в поток боту — до 32 сразу.";
+
+  const stopBtn = el("button", "stw-btn stw-btn-thin", "стоп");
+  stopBtn.type = "button";
+  stopBtn.title = "Вернуть бота в обычный режим (reset) — дропы больше не фармятся";
+  stopBtn.style.display = "none";
+
+  /** ASF wiring, shown only in the bot mode — most users never see these. */
+  const asfBox = el("div", "stw-controls");
+  asfBox.style.display = "none";
+  const urlInput = el("input", "stw-input");
+  urlInput.type = "text";
+  urlInput.placeholder = "http://localhost:1242";
+  urlInput.title = "Адрес web API бота (GlobalConfig → IPC). С loopback ASF пустит без пароля.";
+  const passInput = el("input", "stw-input");
+  passInput.type = "password";
+  passInput.placeholder = "IPC-пароль";
+  passInput.title = "IPCPassword из GlobalConfig — нужен, если ASF слушает не localhost";
+  const botInput = el("input", "stw-input");
+  botInput.type = "text";
+  botInput.placeholder = "имя бота (необяз.)";
+  botInput.title = "Как зовут фермящего бота; пусто — дефолтный бот ASF";
+  const testBtn = el("button", "stw-btn stw-btn-thin", "тест");
+  testBtn.type = "button";
+  testBtn.title = "Проверить, что ASF отвечает, прежде чем ставить игры";
+  const saveBtn = el("button", "stw-btn stw-btn-thin", "сохранить");
+  saveBtn.type = "button";
+  asfBox.append(urlInput, passInput, botInput, testBtn, saveBtn);
 
   const head = el("div", "stw-controls");
-  head.append(scanBtn, allBtn, noneBtn, launchBtn);
+  head.append(scanBtn, allBtn, noneBtn, modeSelect, launchBtn, stopBtn);
 
   const stats = el("div", "stw-stats");
   const statNodes: Record<string, HTMLElement> = {};
@@ -74,7 +119,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   );
 
   const rows = el("div", "stw-rows");
-  section.body.append(head, stats, hint, rows);
+  section.body.append(head, asfBox, stats, hint, rows);
 
   function setChecks(on: boolean): void {
     rows.querySelectorAll<HTMLInputElement>("input").forEach((cb) => {
@@ -146,11 +191,70 @@ async function mount(ctx: FeatureContext): Promise<void> {
     setChecks(false);
   });
 
+  const asfCfg = () => ({
+    url: urlInput.value.trim(),
+    password: passInput.value,
+    bot: botInput.value.trim(),
+  });
+
+  modeSelect.addEventListener("change", () => {
+    const bot = modeSelect.value === "asf";
+    asfBox.style.display = bot ? "" : "none";
+    stopBtn.style.display = bot ? "" : "none";
+  });
+
+  saveBtn.addEventListener("click", () => {
+    void saveAsfConfig(asfCfg()).then(() => status("Настройки бота сохранены", "ok"));
+  });
+
+  testBtn.addEventListener("click", () => {
+    status("Стучимся в ASF…", "work");
+    void (async () => {
+      const r = await probeAsf(asfCfg());
+      status(r.ok ? "Бот на связи" : r.error, r.ok ? "ok" : "err");
+    })();
+  });
+
+  stopBtn.addEventListener("click", () => {
+    if (busy) return;
+    busy = true;
+    void (async () => {
+      const r = await runAsfCommands(asfCfg(), stopCommands(asfCfg()));
+      status(
+        r.failed ? `Стоп не прошёл: ${r.failed}` : "Бот вернулся в обычный режим",
+        r.failed ? "err" : "ok"
+      );
+      busy = false;
+    })();
+  });
+
   launchBtn.addEventListener("click", () => {
     if (busy) return;
     const chosen = appIds.filter((id) => isPicked(id, dropped));
     if (!chosen.length) {
       status("Отметь игры, которые запускаем", "warn");
+      return;
+    }
+    if (modeSelect.value === "asf") {
+      busy = true;
+      void (async () => {
+        /**
+         * The Card Factory trick: play each batch as it lands. One play
+         * command carries 32 appids — it is the bot, not this tab, that
+         * holds the sessions.
+         */
+        const cfg = asfCfg();
+        const commands = playCommands(cfg, chosen.map(Number));
+        status(`Ставим ${chosen.length} игр боту…`, "work");
+        const r = await runAsfCommands(cfg, commands, (i) =>
+          status(`Пачка ${i + 1} из ${commands.length}…`, "work")
+        );
+        status(
+          r.failed ? `Бот встал: ${r.failed}` : `Бот играет ${chosen.length} игр — поток до 32`,
+          r.failed ? "err" : "ok"
+        );
+        busy = false;
+      })();
       return;
     }
     busy = true;
@@ -169,6 +273,12 @@ async function mount(ctx: FeatureContext): Promise<void> {
       status(`Запущено ${chosen.length} шт. Дропы придут с наигранным временем`, "ok");
       busy = false;
     })();
+  });
+
+  void loadAsfConfig().then((cfg) => {
+    urlInput.value = cfg.url;
+    passInput.value = cfg.password;
+    botInput.value = cfg.bot;
   });
 
   status("Нажми «Сканировать» — посчитаем, кому ещё должны карточки");

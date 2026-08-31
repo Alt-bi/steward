@@ -48,7 +48,12 @@ Success check: scanner finds the same 17-row list the probe found, in ≤2 reque
   the existing price pipeline (sum of cheapest cards) so farming sorts by money;
 - select → «в очередь» (max 32); status counts what dropped since (rescan diff).
 
-## Phase 2 — earning the drops (execution engine)
+## Phase 2 — earning the drops (execution engine) — SHIPPED in 2.27.0
+
+Shipped shape: mode select (steam://run / ASF-бот), `asf/exec` through the
+worker (loopback host permission), `play` in 32-appid batches, `reset` to
+stop, `тест` pings `status`. The engine itself (ASF install + login) stays
+the user's step — docs below say how.
 
 The drop is a **Steam-protocol** event (a playing session), not a web call. The
 flash-session button is dead, so a content script cannot «launch» anything. Two
@@ -61,9 +66,10 @@ honest executors:
 - **B. ASF (ArchiSteamFarm)** — the real «32 games in a stream», same trick
   SteamLVLUP runs server-side: ASF farms via SteamKit2 without launching the
   games. Extension becomes the dispatcher: panel → background SW → `POST
-  http://localhost:1242/Api/Farming` / `!farm <appid>` (host_permissions +=
-  `http://localhost:1242/*`). If ASF is not running yet, step one is installing
-  it (user's bot machine; login stays the user's).
+  http://localhost:1242/Api/Command` with `{Command: "play <appids>"}`
+  (host_permissions += `http://localhost:1242/*`; contract read from ASF
+  sources, see `src/core/asf.ts`). If ASF is not running yet, step one is
+  installing it (user's bot machine; login stays the user's).
 
 Default build order ships 0+1 first (read-only, useful even with engine A); B
 hooks in behind the same queue UI once ASF exists.

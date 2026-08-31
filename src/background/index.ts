@@ -65,6 +65,44 @@ const handlers: Handlers = {
   },
 
   "log/read": ({ limit }) => ({ rows: log.slice(-(limit ?? 60)) }),
+
+  /**
+   * The ASF round-trip runs HERE, in the worker: the badges page has no CORS
+   * dealings with a local bot, and ASF answers no preflight anyway. Loopback
+   * only per manifest; the password rides the query per ASF's middleware and
+   * never touches storage beyond this call.
+   */
+  "asf/exec": async ({ url, password, command }) => {
+    const endpoint = `${url.replace(/\/+$/, "")}/Api/Command${password ? `?password=${encodeURIComponent(password)}` : ""}`;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 15000);
+    try {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ Command: command }),
+        signal: ac.signal,
+      });
+      const text = await res.text();
+      let body: { Success?: boolean; Message?: string | null; Result?: string } = {};
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch {
+        return { ok: false, error: `ASF ответил не-JSON (${res.status})` };
+      }
+      if (res.status === 401) return { ok: false, error: "ASF требует IPC-пароль" };
+      if (res.status === 403) return { ok: false, error: "403: ASF пустит только loopback или с паролем" };
+      if (body.Success === false) return { ok: false, error: body.Message || `HTTP ${res.status}` };
+      if (!res.ok && body.Success === undefined) return { ok: false, error: `HTTP ${res.status}` };
+      note("asf", `${command} ok`);
+      return { ok: true, value: body.Result, message: body.Message };
+    } catch (err) {
+      const why = err instanceof Error && err.name === "AbortError" ? "таймаут" : String(err);
+      return { ok: false, error: `ASF не отвечает (${why})` };
+    } finally {
+      clearTimeout(timer);
+    }
+  },
 };
 
 serve(handlers);

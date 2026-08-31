@@ -1,3 +1,23 @@
+
+## 2.21.0 follow-up — the bucket question, closed by live evidence
+
+The React Query cache inside the rewritten item page gave the game away: the
+frontend queries `QueryListingsForItem` with `strItemName` set to the GROUP id
+(`"G1807209A023004"`), not the wear name. Replayed live against our signed
+endpoint the group id answers with the full book — `total_count` 1652, first
+lot 230000 cents — where every name-based form answers zero. Not a ban, not
+anonymity: grouped CS items simply do not answer to `market_hash_name`.
+
+That is exactly the chain 2.21.0 already carries — `search/render` (live,
+200, real counts) hands out `market_bucket_group_id` per row, `learnGroups`
+stores it keyed by hash, `scanCompetitors` asks the book by the learned id
+and filters `market_name_inside_group` down to our wear. Both legs of the
+chain now verified against the user's signed-in tab. No code change needed;
+the version stays 2.21.0.
+
+Still open: legacy `market/myhome` with session still returns the page (it
+is no longer a JSON endpoint); the mylistings flow must keep using the DOM/
+SSR sources.
 # Development log
 
 What changed, why, and how it was found. Newest first.

@@ -25,7 +25,7 @@ otherwise.
   source («Drops earned by purchasing») shows on rows — F2P-without-purchase
   games can be filtered out before farming them.
 
-## Phase 0 — scanner (pure read, no new permissions)
+## Phase 0 — scanner — SHIPPED in 2.26.0 (notes below)
 
 `src/steam/badges.ts`:
 - fetch `…/my/badges/?l=english&p=N` (fetchText, SSR page) until a page carries
@@ -42,7 +42,7 @@ otherwise.
 
 Success check: scanner finds the same 17-row list the probe found, in ≤2 requests.
 
-## Phase 1 — «Карточки» section on /my/badges
+## Phase 1 — «Карточки» section on /my/badges — SHIPPED in 2.26.0 (notes below)
 
 - list unfinished sets with a checkbox per game, «N дропов», price of the set via
   the existing price pipeline (sum of cheapest cards) so farming sorts by money;

@@ -837,3 +837,24 @@ after opens that wide. Clamp guards the restore (>=320, <=viewport).
 Wear reached the rows list too: a stack reads
 `81,27 за штуку · float 0.15-0.38`, so the float that decorates the tile
 explains itself in the row without a second glance at the grid.
+
+## SIH parity cycle — what stayed, and why
+
+Studied the SIH 1.17.6 source end to end before copying anything. The parts
+worth copying were wear on tiles and the inventory ritual (both shipped in
+2.22.x); the parts that looked like gaps were checked against this codebase
+and mostly are not:
+
+- `avg7` is not noise. It is a selling strategy with its own volume guard
+  (`levelVolume` in core/levels), not a fourth number glued to a row. Users
+  who sell into a thin week choose it deliberately; removing it is a
+  regression, not a cleanup.
+- The listing ladder already answers "no data" with a tooltip explaining
+  *why* (`describeMissingLevel`), so a long-history average is never shown
+  as if trusted when it is not.
+- Every visible string is Russian; the only English left in feature files is
+  in code comments, which the user never sees.
+- SIH itself is breaking on the 2026 SSR market (its own support threads:
+  "listings vanish when SIH is on"). Feature parity with a page-scraper is
+  the wrong target; parity with what the *user* does is the right one, and
+  that is the bar the three shipped versions moved.

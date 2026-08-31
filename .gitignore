@@ -7,3 +7,10 @@ dist/
 Thumbs.db
 .vscode/
 .idea/
+
+# Development & promotion plans — not part of the codebase
+PLAN.md
+PROMOTION_PLAN.md
+
+# Raw research captures — kept on disk, too heavy/noisy for the repo
+captures/

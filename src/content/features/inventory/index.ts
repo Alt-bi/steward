@@ -36,6 +36,7 @@ import {
   waitForPage,
 } from "../../../steam/page-context";
 import { fetchMarketLows } from "../../../steam/prices";
+import { fetchWear, wearChip, type WearInfo } from "../../../steam/floats";
 import { el, type StatusKind } from "../../ui/panel";
 import { describeError, haltsRun, outcomeUnknown } from "../../ui/errors";
 import { register, type FeatureContext } from "../registry";
@@ -79,6 +80,9 @@ const HISTORY_PER_MIN = 6;
 /** Above this many unknown histories the run is confirmed with its cost first. */
 const HISTORY_ASK_ABOVE = 12;
 
+/** Steam keeps wear on real copies for this app only, so nothing else pays for it. */
+const WEAR_APPID = 730;
+
 interface State {
   busy: boolean;
   abort: boolean;
@@ -100,6 +104,11 @@ interface State {
   sort: SortKey;
   /** Flat item list, kept for painting badges onto Steam tiles. */
   items: InventoryItem[];
+  /**
+   * Wear per assetid, cached for the life of the page — an asset never changes
+   * its float, so a re-scan is free. Only the owner's own page can have it.
+   */
+  wears: Map<string, WearInfo>;
 }
 
 function money(cents: Cents | null | undefined): string {
@@ -122,6 +131,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     filters: { ...DEFAULT_FILTERS },
     sort: "value",
     items: [],
+    wears: new Map(),
   };
 
   const stats = el("div", "stw-stats");
@@ -486,6 +496,14 @@ async function mount(ctx: FeatureContext): Promise<void> {
       cents == null ? "—" : money(cents)
     );
     data.picked = (assetid) => picked.has(assetid);
+    if (state.wears.size) {
+      const wearByAsset = new Map<string, string>();
+      for (const [assetid, wear] of state.wears) {
+        const chip = wearChip([wear]);
+        if (chip) wearByAsset.set(assetid, chip);
+      }
+      data.wearByAsset = wearByAsset;
+    }
     paintBadges(document.body, data);
   }
 
@@ -730,11 +748,52 @@ async function mount(ctx: FeatureContext): Promise<void> {
         "work"
       );
       await priceGroups(toPrice);
+      await loadWears(owner);
     } catch (err) {
       status(`Инвентарь: ${describeError(err)}`, "err");
     } finally {
       setBusy(false);
     }
+  }
+
+  /**
+   * Wear for CS copies on screen. One request per context covers every asset
+   * Steam owns in it, so this is decoration that costs almost nothing — and it
+   * is only asked on a page that is provably the owner's own, because a float
+   * is only ever worth reading about a copy that could be listed.
+   */
+  async function loadWears(owner: { steamid: string; assumed: boolean } | null): Promise<void> {
+    const viewer = steamId();
+    if (!owner || !viewer || owner.steamid !== viewer) return;
+    const fresh = state.items.filter(
+      (item) => item.appid === WEAR_APPID && !state.wears.has(item.assetid)
+    );
+    if (!fresh.length) return;
+
+    const contexts = new Map<string, typeof fresh>();
+    for (const item of fresh) {
+      const key = `${item.appid}_${item.contextid}`;
+      const list = contexts.get(key) ?? [];
+      list.push(item);
+      contexts.set(key, list);
+    }
+
+    for (const list of contexts.values()) {
+      const first = list[0];
+      if (!first) continue;
+      try {
+        const found = await fetchWear(
+          { steamid: viewer, appid: first.appid, contextid: first.contextid },
+          first.assetid,
+          pacing
+        );
+        for (const [assetid, wear] of found) state.wears.set(assetid, wear);
+      } catch (err) {
+        if (err instanceof SteamError && (err.kind === "aborted" || err.kind === "blocked")) throw err;
+        /** Wear decorates; it never fails the scan over itself. */
+      }
+    }
+    repaintBadges();
   }
 
   async function resume(): Promise<void> {

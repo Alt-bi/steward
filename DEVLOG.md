@@ -1,5 +1,30 @@
 ## 2.21.1 — reprice learns the group id itself
 
+## 2.22.0 — wear on the tiles (SIH parity, one request instead of a queue)
+
+The one CS feature SIH had and we did not: the float value on an owned
+copy. SIH fetches it per item through its own server, a queue and a
+click — and it reads the numbers off Steam's own dialog rather than
+asking Steam.
+
+Probing the live site found the endpoint the inventory page itself uses:
+`/inventory/{steamid}/{appid}/{contextid}/itemdynproperties/{assetid}`
+replies with Wear Rating, Pattern Template and Paint Seed for every copy
+in the context, no matter which assetid sits in the path (verified 2026-08:
+5 copies answered from one call; comma-lists and the bare path either 404
+or hit the duplicate-action guard). One request decorates a whole screen.
+
+New `steam/floats.ts` owns the endpoint; the scan loads wear after the
+prices, on the owner's own page only, and caches it for the page's life —
+a float belongs to an asset forever, so re-scans are free. Chips paint on
+the tile's top edge (`float 0.381`, `float 0.15–0.381` when the stack
+differs) where the price badge never sits. It rides the `inventory`
+budget kind; a refusal decorates less, it never fails the scan.
+
+Five tests pin the shape of the answer — including «no wear is an answer,
+not a failure», because a crate has no float and must not look broken.
+
+
 The bucket fact was proven but unreachable: `priceAndPlan` runs the exact pass
 with `cacheOnly`, so search never fires before the book, and a CS skin with no
 previously learned id hits `unnamed` and gets skipped — for every user who has

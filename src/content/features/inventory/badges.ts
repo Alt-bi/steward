@@ -12,6 +12,7 @@ import type { InventoryItem } from "../../../steam/inventory";
  */
 
 const BADGE_CLASS = "stw-badge";
+const WEAR_CLASS = "stw-wear";
 const MARK_ATTR = "data-stw-badge";
 
 export { parseTileId };
@@ -59,6 +60,8 @@ export interface BadgeData {
   format: (cents: Cents | null) => string;
   /** Whether this copy is ticked for selling. Absent means "do not mark tiles". */
   picked?: (assetid: string) => boolean;
+  /** assetid -> wear text («FT 0.24»), when Steam was asked and answered. */
+  wearByAsset?: Map<string, string>;
 }
 
 /**
@@ -121,6 +124,24 @@ function badgeFor(tile: Element): HTMLElement {
   return badge;
 }
 
+/**
+ * Wear rides on the top edge of the tile, where the price does not sit. Empty
+ * text means no answer for this copy — the label comes off rather than showing «?».
+ */
+function paintWear(tile: Element, text: string | undefined): void {
+  let label = tile.querySelector<HTMLElement>(`.${WEAR_CLASS}`);
+  if (!text) {
+    if (label) label.remove();
+    return;
+  }
+  if (!label) {
+    label = document.createElement("div");
+    label.className = WEAR_CLASS;
+    tile.appendChild(label);
+  }
+  label.textContent = text;
+}
+
 export interface PaintResult {
   painted: number;
   /** Tiles we found but had no price for. */
@@ -160,6 +181,8 @@ export function paintBadges(root: ParentNode, data: BadgeData): PaintResult {
     badge.textContent = data.format(price);
     badge.dataset.stwKnown = price == null ? "0" : "1";
     (tile as HTMLElement).setAttribute(MARK_ATTR, "1");
+    /** Wear rides along on the same pass — it arrives with the prices, not before. */
+    paintWear(tile, data.wearByAsset?.get(ref.assetid));
     /** Only the dropped copies are marked; a full selection must look untouched. */
     if (data.picked) {
       (tile as HTMLElement).dataset.stwPick = data.picked(ref.assetid) ? "1" : "0";

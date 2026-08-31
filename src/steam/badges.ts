@@ -137,3 +137,22 @@ export async function scanBadges(opts: BadgeScanOptions): Promise<BadgeScan> {
 export function farmableRows(scan: BadgeScan): BadgeRow[] {
   return scan.rows.filter((r) => !r.foil && r.dropsRemaining !== null && r.dropsRemaining > 0);
 }
+
+/**
+ * What dropped between two scans: appid -> how many fewer drops Steam counts
+ * now. The badges page is the only ledger that matters, and this diff is how
+ * the panel proves the farming is working without asking Steam for anything.
+ */
+export function dropsDelta(
+  before: Map<number, number | null>,
+  now: readonly BadgeRow[]
+): Map<number, number> {
+  const out = new Map<number, number>();
+  for (const row of now) {
+    const was = before.get(row.appid);
+    const is = row.dropsRemaining;
+    if (was === null || was === undefined || is === null) continue;
+    if (is < was) out.set(row.appid, was - is);
+  }
+  return out;
+}

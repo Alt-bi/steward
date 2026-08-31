@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { badgeRowFrom, badgesPageFrom, farmableRows, totalBadgesFrom } from "../src/steam/badges";
+import { badgeRowFrom, badgesPageFrom, dropsDelta, farmableRows, totalBadgesFrom } from "../src/steam/badges";
 
 /**
  * The badges page, as the rewritten community actually serves it.
@@ -102,5 +102,26 @@ describe("badgeRowFrom, on hand-built markup", () => {
     const row = badgeRowFrom(chunk(730, "CS", "No card drops remaining", "2"));
     assert.ok(row);
     assert.equal(row.level, 3);
+  });
+});
+
+describe("dropsDelta — the farming receipt", () => {
+  const chunk = (appid: number, drops: number) =>
+    `id="badge_gamebadge_${appid}_1_0"><div class="badge_title">G${appid}&nbsp;<span>` +
+    `<span class="progress_info_bold">${drops} card drops remaining</span>`;
+  const row = (appid: number, drops: number) => badgeRowFrom(chunk(appid, drops))!;
+
+  it("counts a drop that landed", () => {
+    const d = dropsDelta(new Map([[440, 4]]), [row(440, 2)]);
+    assert.equal(d.get(440), 2);
+  });
+
+  it("keeps quiet when nothing changed or the game fell off the list", () => {
+    const before = new Map([[440, 2], [730, 1]]);
+    assert.equal(dropsDelta(before, [row(440, 2)]).size, 0);
+  });
+
+  it("never calls a growing counter a drop", () => {
+    assert.equal(dropsDelta(new Map([[440, 1]]), [row(440, 3)]).size, 0);
   });
 });

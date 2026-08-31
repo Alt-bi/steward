@@ -989,3 +989,9 @@ The evening's own bug, caught by its own tests: a heredoc can eat a
 backslash so `\b` lands in the file as byte 0x08 — esbuild saw a literal
 backspace in the regex. Now the pattern is a named constant, and there is a
 test reading a refusal hidden inside a 200.
+
+## 2.27.1 — the receipt
+
+dropsDelta diffs two scans: which appids dropped how many. The tab keeps the
+last counts and, on rescan, says what landed - the only proof farming
+works is Steam counting fewer drops, and now the panel shows it.

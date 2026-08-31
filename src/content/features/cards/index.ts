@@ -15,7 +15,7 @@ import {
   saveAsfConfig,
   stopCommands,
 } from "../../../core/asf";
-import { farmableRows, scanBadges } from "../../../steam/badges";
+import { dropsDelta, farmableRows, scanBadges } from "../../../steam/badges";
 import { allowSteamTraffic, sleep } from "../../../steam/net";
 import { describeError } from "../../ui/errors";
 import { el, type StatusKind } from "../../ui/panel";
@@ -39,6 +39,8 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
   const dropped: Picks = noneDropped();
   let appIds: string[] = [];
+  /** appid -> drops remaining at the last scan; empty until the first one. */
+  let baseline = new Map<number, number | null>();
   let busy = false;
 
   const status = (text: string, kind: StatusKind = "") => section.setStatus(text, kind);
@@ -170,8 +172,19 @@ async function mount(ctx: FeatureContext): Promise<void> {
           farmable.reduce((n, r) => n + (r.dropsRemaining ?? 0), 0)
         );
         statNodes.badges!.textContent = String(scan.rows.length);
+        const now = new Map(scan.rows.map((r) => [r.appid, r.dropsRemaining] as const));
+        const landed = dropsDelta(baseline, scan.rows);
+        baseline = now;
+        if (landed.size) {
+          const names = farmable
+            .filter((r) => landed.has(r.appid))
+            .slice(0, 3)
+            .map((r) => `${r.name} −${landed.get(r.appid)}`);
+          status(`Капнуло: ${names.join(", ")}${landed.size > names.length ? "…" : ""}`, "ok");
+        } else {
+          status(farmable.length ? "Отмечай и запускай" : "Дропов не осталось — можно крафтить", "ok");
+        }
         renderRows(farmable);
-        status(farmable.length ? "Отмечай и запускай" : "Дропов не осталось — можно крафтить", "ok");
       } catch (err) {
         status(describeError(err), "err");
       } finally {

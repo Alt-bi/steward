@@ -21,6 +21,8 @@ interface RelayPayload {
   stop: boolean;
   /** Ask Steam (via our own profile page) whether it sees us In-Game. */
   verify?: boolean;
+  /** Golden 742 bytes to inject verbatim (diagnostic replay). */
+  replay?: number[];
   entries: { appid: number; playing: boolean; secure: boolean; offline: boolean }[];
 }
 
@@ -60,6 +62,10 @@ export function mountChatRelay(): void {
     void (async () => {
       if (payload.verify) {
         sendResponse(await bridgeCall("cm-play/verify", {}));
+        return;
+      }
+      if (payload.replay && payload.replay.length) {
+        sendResponse(await bridgeCall("cm-play/replay", { bytes: payload.replay }));
         return;
       }
       if (payload.stop) {

@@ -1,21 +1,16 @@
 /**
  * Hand-rolled protobuf for exactly one Steam message: ClientGamesPlayed.
  *
- * Steam's protobufjs schema does not live in the chat bundle (their factory
- * encodes server-side — we read their code to learn that), so we encode the
- * packet ourselves. The field map comes from Valve's own published protobufs
- * (SteamDatabase/Protobufs, steammessages_clientserver.proto):
+ * The wire format here is NOT guessed: it was diffed byte-for-byte against a
+ * real Card Factory frame captured off a working SteamLVLUP session (ring
+ * capture, 20 games in one packet — see test/cm-play.test.ts "golden wire").
  *
- *   CMsgClientGamesPlayed {
- *     repeated GamePlayed games_played = 1;
- *     optional uint32 client_os_type = 2;
- *     GamePlayed { fixed64 game_id = 2; bool is_secure = 5;
- *                  string game_extra_info = 7; uint32 game_flags = 11 }
- *   }
- *
- * Frame on the CM websocket, captured live from the chat's socket:
- *   uint32le(EMsg | 0x80000000) | uint32le(payload length) | payload
- * Payload = CMsgProtoBufHeader as field 1, then the message's own fields.
+ * Frame, as the golden bytes show:
+ *   uint32le(EMsg | 0x80000000)
+ *   uint32le(headerBytes)          // length of the CMsgProtoBufHeader ONLY
+ *   CMsgProtoBufHeader: field 1 fixed64 steamid, field 2 varint sessionid
+ *   message body follows immediately: repeated field 1 entries, each holding
+ *   fixed64 field 2 = game id (bare appid, no type bits)
  */
 
 /** EMsg.k_EServerClientGamesPlayed — named in SteamLVLUP's own constants. */
@@ -77,28 +72,32 @@ export function protoBufHeader(ids: CmIds): number[] {
   return [...fixed64Field(1, steamid), ...varField(2, sid)];
 }
 
-/** One GamePlayed per entry; presence of the entry is what says "playing". */
+/** One GamePlayed per entry; presence of the entry is what says "playing".
+ * Golden bytes are minimal: field 1 { fixed64 field 2 = appid }, nothing else. */
 export function gamesPlayedBody(entries: PlayEntry[]): number[] {
   const out: number[] = [];
   for (const e of entries) {
     const game = [
-      ...fixed64Field(2, BigInt(e.appid)), // game_id, fixed64 per Valve's proto
-      ...(e.secure === false ? [] : varField(5, 1)), // is_secure
+      ...fixed64Field(2, BigInt(e.appid)), // game_id, fixed64, bare appid
+      ...(e.secure === true ? varField(5, 1) : []), // is_secure — only when asked
       ...(e.name ? strField(7, e.name) : []), // game_extra_info
     ];
     out.push(...lenField(1, game));
   }
-  // client_os_type = 2: Windows, the way the desktop reports it.
-  if (entries.length > 0) out.push(...varField(2, 8));
   return out;
 }
 
-/** Full websocket frame: header envelope + message fields + frame prefix. */
+/** Full websocket frame, byte-for-byte per the captured golden frame:
+ * u32(EMsg|0x80000000), u32(header length), raw header, raw body. */
 export function buildGamesPlayedFrame(entries: PlayEntry[], ids: CmIds): Uint8Array {
   const header = protoBufHeader(ids);
   const body = gamesPlayedBody(entries);
-  const payload = [...lenField(1, header), ...body];
-  return new Uint8Array([...u32le((EM_GAMES_PLAYED | 0x80000000) >>> 0), ...u32le(payload.length), ...payload]);
+  return new Uint8Array([
+    ...u32le((EM_GAMES_PLAYED | 0x80000000) >>> 0),
+    ...u32le(header.length),
+    ...header,
+    ...body,
+  ]);
 }
 
 /** Read the EMsg out of a CM websocket frame; -1 when it isn't one. */

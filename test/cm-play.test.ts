@@ -9,6 +9,7 @@ import {
   gamesPlayedBody,
   inGameFromProfileHtml,
   protoBufHeader,
+  varintBytes,
 } from "../src/page/cm-play-core";
 
 const hex = (bytes: number[]): string =>
@@ -17,27 +18,42 @@ const hex = (bytes: number[]): string =>
 /**
  * Captured live from the chat client's CM websocket (unhooked, unedited):
  * a ClientPersonaState frame carries exactly the header we must reproduce —
- * steamid 76561198117744263 (redacted sample below), sessionid -1470582744.
+ * redacted steamid, sessionid -1470582744 (a 10-byte negative varint: Steam
+ * widens int32 negatives to int64 two's complement).
  */
-const LIVE_HEADER = "09 87 ee 62 09 01 00 10 01 10 a8 e0 e2 c2 fa ff ff ff ff 01";
+const LIVE_HEADER = "09 00 10 a6 e8 d2 ff 0f 01 10 a8 e0 e2 c2 fa ff ff ff ff 01";
 
 describe("cm-play-core", () => {
   it("writes the header byte-for-byte like the live chat frames", () => {
-    const got = protoBufHeader({ steamid: "76561198117744263", sessionid: -1470582744 });
+    const got = protoBufHeader({ steamid: "76561000000000000", sessionid: -1470582744 });
     assert.equal(hex(got), LIVE_HEADER);
   });
 
-  it("encodes a play frame the CM will read", () => {
-    const frame = buildGamesPlayedFrame(
-      [{ appid: 99000, secure: true, name: "CHUCHEL" }],
-      { steamid: "76561198117744263", sessionid: 111 }
-    );
-    assert.equal(frameEMsg(frame), 742);
+  it("the second u32 is the HEADER length, not the payload length", () => {
+    // The golden Card Factory frame (captured off a working farm) is 243 bytes
+    // total and declares 15 — the header size. Our first versions wrote the
+    // total and wrapped the header in a field; Steam silently ate both.
+    const frame = buildGamesPlayedFrame([{ appid: 99000 }], {
+      steamid: "76561000000000000",
+      sessionid: 1538349215,
+    });
     const declared = frame[4]! | (frame[5]! << 8) | (frame[6]! << 16) | (frame[7]! << 24);
-    assert.equal(declared, frame.length - 8); // length field honest
-    // game_id is field 2 fixed64 per Valve's proto, not a varint in field 1
-    const body = gamesPlayedBody([{ appid: 99000, secure: false, name: "" }]);
-    assert.equal(body[0], 0x0a); // games_played = field 1, length-delimited
+    const header = protoBufHeader({ steamid: "76561000000000000", sessionid: 1538349215 });
+    assert.equal(declared, header.length);
+    assert.equal(frameEMsg(frame), 742);
+    // header lands raw after the two words: steamid tag 0x09 at byte 8
+    assert.equal(frame[8], 0x09);
+  });
+
+  it("a bare appid encodes exactly like the golden frame's games", () => {
+    // 20 games of a real farm run were each `0a 09 11 <appid little-endian>`;
+    // no secure flags, no names, no os type.
+    const body = gamesPlayedBody([{ appid: 461880 }]);
+    assert.equal(
+      hex(body),
+      "0a 09 11 38 0c 07 00 00 00 00 00"
+    );
+    assert.equal(body.length, 11);
   });
 
   it("the profile receipt says what Steam sees", () => {
@@ -57,9 +73,14 @@ describe("cm-play-core", () => {
   });
 
   it("the empty list stops cleanly and still names itself", () => {
-    const frame = buildGamesPlayedFrame([], { steamid: "76561198117744263", sessionid: 5 });
+    const frame = buildGamesPlayedFrame([], { steamid: "76561000000000000", sessionid: 5 });
     assert.equal(frameEMsg(frame), 742);
     const declared = frame[4]! | (frame[5]! << 8) | (frame[6]! << 16) | (frame[7]! << 24);
-    assert.equal(declared, frame.length - 8);
+    assert.equal(declared, frame.length - 8); // body is empty, so both agree
+  });
+
+  it("negative sessionids widen to int64 like the chat's own frames", () => {
+    assert.equal(hex(varintBytes(-1)), "ff ff ff ff ff ff ff ff ff 01");
+    assert.equal(hex(varintBytes(0)), "00");
   });
 });

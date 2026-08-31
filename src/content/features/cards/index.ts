@@ -76,6 +76,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
   const stopBtn = el("button", "stw-btn stw-btn-thin", "стоп");
   const snapBtn = el("button", "stw-btn stw-btn-thin", "снимок 742");
+  const replayBtn = el("button", "stw-btn stw-btn-thin", "реплей эталона");
   stopBtn.type = "button";
   stopBtn.title = "Вернуть бота в обычный режим (reset) — дропы больше не фармятся";
   stopBtn.style.display = "none";
@@ -103,7 +104,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   asfBox.append(urlInput, passInput, botInput, testBtn, saveBtn);
 
   const head = el("div", "stw-controls");
-  head.append(scanBtn, allBtn, noneBtn, modeSelect, launchBtn, stopBtn, snapBtn);
+  head.append(scanBtn, allBtn, noneBtn, modeSelect, launchBtn, stopBtn, snapBtn, replayBtn);
 
   const stats = el("div", "stw-stats");
   const statNodes: Record<string, HTMLElement> = {};
@@ -265,10 +266,18 @@ async function mount(ctx: FeatureContext): Promise<void> {
       void (async () => {
         const r = await send("cm/play", {
           stop: false,
-          entries: chosen.map((id) => ({ appid: Number(id), playing: true, secure: true, offline: false })),
+          entries: chosen.map((id) => ({ appid: Number(id), playing: true, secure: false, offline: false })),
         });
         if (!r.ok) {
-          status("Чат не принял заявку: " + ("error" in r ? r.error : "?"), "err");
+          // The worker may answer with a receipt ("chat said Steam ignores
+          // this") instead of an error; show whichever it is, never "?".
+          const why =
+            "error" in r && r.error
+              ? r.error
+              : "note" in r && r.note
+                ? String(r.note)
+                : "чат не ответил";
+          status("Чат не принял заявку: " + why, "err");
           busy = false;
           return;
         }
@@ -333,6 +342,38 @@ async function mount(ctx: FeatureContext): Promise<void> {
   snapBtn.title =
     "Показывает сохранённые кадры 742 (ClientGamesPlayed), которые видел любой открытый чат:\n" +
     "наши заявки и чужие (например из Card Factory) — для побайтового сравнения движков.";
+  replayBtn.title =
+    "Диагностика: берёт сохранённый ЧУЖОЙ кадр 742 (например из Card Factory) и шлёт его " +
+    "байт-в-байт через наш сокет чата. Если Steam признает его, а нашу заявку нет — " +
+    "дело в кодировании, а не в трубе.";
+  replayBtn.addEventListener("click", () => {
+    void (async () => {
+      const ring = await send("cm/golden", {});
+      const foreign = ring.frames.filter((f) => !f.mine).sort((a, b) => b.bytes.length - a.bytes.length);
+      if (!foreign.length) {
+        status("В кольце нет чужих кадров — нечего реплеить", "warn");
+        return;
+      }
+      busy = true;
+      status("Шлём эталонный кадр байт-в-байт (" + foreign[0]!.bytes.length + " B)…", "work");
+      const r = await send("cm/play", { stop: false, replay: foreign[0]!.bytes, entries: [] });
+      if (!r.ok) {
+        status("Реплей не дошёл: " + ("error" in r ? r.error : "?"), "err");
+        busy = false;
+        return;
+      }
+      status("Реплей: " + (("note" in r && r.note) || "ушёл"), "work");
+      await sleep(4000);
+      const v = await send("cm/play", { stop: false, verify: true, entries: [] });
+      if (v.ok) {
+        status("Эталон принят: Steam видит " + (("note" in v && v.note) || "In-Game"), "ok");
+      } else {
+        status("Даже эталон не принят (профиль: " + (("note" in v && v.note) || "не виден") + ")", "warn");
+      }
+      busy = false;
+    })();
+  });
+
   snapBtn.addEventListener("click", () => {
     void (async () => {
       const ring = await send("cm/golden", {});

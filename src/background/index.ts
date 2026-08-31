@@ -114,6 +114,9 @@ const handlers: Handlers = {
           | { ok?: boolean; note?: string }
           | undefined;
         if (reply && reply.ok) return { ok: true, sent: true, note: reply.note };
+        // The chat answered and said "Steam does not see it" — that is an
+        // answer, not a missing tab. Carry the receipt, do not swallow it.
+        if (reply && reply.ok === false) return { ok: false, sent: true, note: reply.note };
       } catch {
         /* a chat tab without our content script (or asleep) — try the next */
       }
@@ -122,15 +125,17 @@ const handlers: Handlers = {
   },
   "cm/capture": async (req) => {
     const key = "cmCaptured";
-    const prev = await chrome.storage.session.get(key);
+    const prev = await chrome.storage.local.get(key);
     const list: unknown[] = Array.isArray(prev[key]) ? (prev[key] as unknown[]) : [];
     list.push({ ...req });
-    while (list.length > 8) list.shift();
-    await chrome.storage.session.set({ [key]: list });
+    while (list.length > 24) list.shift();
+    // storage.local survives service-worker restarts, and Edge keeps it in a
+    // leveldb we can read from disk — the golden-bytes loop depends on that.
+    await chrome.storage.local.set({ [key]: list });
     return { ok: true };
   },
   "cm/golden": async () => {
-    const prev = await chrome.storage.session.get("cmCaptured");
+    const prev = await chrome.storage.local.get("cmCaptured");
     const list = Array.isArray(prev.cmCaptured)
       ? (prev.cmCaptured as { bytes: number[]; mine: boolean; at: number }[])
       : [];

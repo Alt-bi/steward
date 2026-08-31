@@ -99,8 +99,8 @@ export interface Protocol {
    * appid-boolean list so the same shape carries both.
    */
   "cm/play": {
-    req: { stop: boolean; verify?: boolean; entries: { appid: number; playing: boolean; secure: boolean; offline: boolean }[] };
-    res: { ok: true; sent: boolean; note?: string } | { ok: false; error: string };
+    req: { stop: boolean; verify?: boolean; replay?: number[]; entries: { appid: number; playing: boolean; secure: boolean; offline: boolean }[] };
+    res: { ok: true; sent: boolean; note?: string } | { ok: false; error: string } | { ok: false; sent: true; note?: string };
   };
   /** A MAIN-bridge captured 742 frame (ours or a golden one from another
    * extension's Start press). The worker keeps a small ring in storage. */

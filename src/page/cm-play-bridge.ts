@@ -105,8 +105,27 @@ function stop(): { ok: boolean; note?: string } {
 function replayRaw(bytes: number[]): { ok: boolean; note?: string } {
   const ws = cmSocket();
   if (!ws) return { ok: false, note: "open the chat (steamcommunity.com/chat) first" };
-  ws.send(new Uint8Array(bytes));
-  return { ok: true, note: "raw frame injected" };
+  const b = new Uint8Array(bytes);
+  ws.send(b);
+  // Compare the sid baked into the golden frame with this chat's live sid —
+  // that is the difference between "Steam trusts our socket" and "the frame
+  // encodes a session Steam already knows".
+  let note = "raw frame injected";
+  const ids = cmIds();
+  if (ids && b.length > 18) {
+    const hlen = b[4]! + (b[5]! << 8);
+    const start = 8 + 9; // header tag + fixed64 steamid
+    let v = 0n;
+    let shift = 0n;
+    for (let i = start; i < 8 + hlen && i < b.length; i++) {
+      v |= BigInt(b[i]! % 128) << shift;
+      shift += 7n;
+      if (b[i]! < 128) break;
+    }
+    if (v >= 1n << 63n) v -= 1n << 64n;
+    note = "golden sid " + v + ", chat sid " + ids.sessionid + (v === BigInt(ids.sessionid) ? " (SAME)" : " (different)");
+  }
+  return { ok: true, note };
 }
 
 /**

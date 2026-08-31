@@ -926,3 +926,37 @@ waiting and not dying. On tiles the wear chip moved above the price badge:
 Steam counts stacks in the top corner and the two were fighting for it.
 The panel got the rest of its own skin — themed scrollbar, focus rings,
 tabular numbers, a muted wear chip so five greens are one voice.
+
+## 2.26.0 — the Cards tab sees the drop debt
+
+The badges page went through the same SSR rewrite as the market: the old
+`ajaxallbadges` fragment answers with the full page now, and the gamecards page
+lost its start-playing button. Both facts come from probing a logged-in profile,
+not from guessing — and the second one decided the architecture: a
+content script cannot emulate a game launch through the page, so the extension
+will not pretend otherwise.
+
+What landed is the half that is pure read:
+
+- `src/steam/badges.ts` parses the SSR sheet by regex over text, the same way
+  the hover refs are read. `id="badge_gamebadge_495570_1_0"` anchors every row
+  (appid, badge level, foil suffix); drops and collection progress sit in
+  classes the rewrite did not move. Foil rows carry no drop counter and the
+  parser keeps them out of the farmable set instead of reading them as zero.
+- The walk reads up to 20 pages, stops on Steam's own «Showing … of N badges»
+  total, and reports progress into the status line the way the listing walk
+  learned to in 2.25.1.
+- The «Карточки» tab on /my/badges: a scan fills stats and a picked list of
+  games that still owe drops, sorted by debt. «Запустить в Steam» opens
+  `steam://run/<appid>` for every ticked game — for one or two games this is
+  the whole loop; for thirty-two it is what the ASF rung will take over.
+- `test/fixtures/badges-page1.html` is a captured live page, redacted before it
+  can reach the public repo (profile URL, steamid64, account id, avatar). The
+  fixture test asserts 147 rows / 20 farmable on it — the day Valve renames a
+  class, the suite says so first, not the user.
+- `badges` joined the governor at 6/min. A scan of a 296-badge library is two
+  requests, and a farm account can wait its seconds.
+
+The run button deliberately stops at `steam://`: no fake progress bar. Launch
+emulation across 32 games is a SteamKit job, and docs/cards-factory.md keeps
+the ASF rung planned with its honest boundaries.

@@ -60,7 +60,8 @@
         "https://steamcommunity.com/profiles/*/inventory*",
         "https://steamcommunity.com/id/*/tradeoffers*",
         "https://steamcommunity.com/profiles/*/tradeoffers*",
-        "https://steamcommunity.com/tradeoffer/*"
+        "https://steamcommunity.com/tradeoffer/*",
+        "https://steamcommunity.com/*/*/badges*"
       ],
       "js": [
         "content.js"

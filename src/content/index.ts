@@ -12,6 +12,7 @@ import "./features/inventory";
 import "./features/offers";
 import "./features/trade";
 import "./features/listing";
+import "./features/cards";
 
 async function boot(): Promise<void> {
   if (panelExists()) return;

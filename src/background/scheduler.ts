@@ -44,6 +44,8 @@ const LIMITS: Record<NetKind, Budget> = {
   inventory: { ratePerMin: 10, capacity: 2, minRatePerMin: 3 },
   /** Item classes never change, so every one of these is paid for exactly once. */
   description: { ratePerMin: 20, capacity: 5, minRatePerMin: 4 },
+  /** A badge scan is a handful of SSR pages over a whole library; not hot. */
+  badges: { ratePerMin: 6, capacity: 2, minRatePerMin: 2 },
   write: { ratePerMin: 8, capacity: 1, minRatePerMin: 2 },
 };
 

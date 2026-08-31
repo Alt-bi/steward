@@ -15,6 +15,7 @@ export type NetKind =
   | "mylistings"
   | "inventory"
   | "description"
+  | "badges"
   | "write";
 
 export type NetOutcome = "ok" | "rate_limited" | "empty" | "error";

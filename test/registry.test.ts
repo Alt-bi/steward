@@ -10,6 +10,7 @@ import "../src/content/features/buyorders";
 import "../src/content/features/inventory";
 import "../src/content/features/trade";
 import "../src/content/features/listing";
+import "../src/content/features/cards";
 
 function idsFor(href: string): string[] {
   return activeFeatures(new URL(href), DEFAULT_SETTINGS).map((f) => f.id);
@@ -19,7 +20,7 @@ describe("feature routing", () => {
   it("registers every feature exactly once", () => {
     const ids = allFeatures().map((f) => f.id);
     assert.deepEqual([...new Set(ids)].sort(), ids.slice().sort(), "no duplicate registrations");
-    assert.deepEqual(ids.slice().sort(), ["buyorders", "inventory", "listing", "reprice", "trade"]);
+    assert.deepEqual(ids.slice().sort(), ["buyorders", "cards", "inventory", "listing", "reprice", "trade"]);
   });
 
   it("puts reprice and buy orders on the market front page", () => {
@@ -63,5 +64,15 @@ describe("feature routing", () => {
     const off = { ...DEFAULT_SETTINGS, features: { reprice: false } };
     const ids = activeFeatures(new URL("https://steamcommunity.com/market/"), off).map((f) => f.id);
     assert.deepEqual(ids, ["buyorders"]);
+  });
+});
+describe("cards routing", () => {
+  it("mounts on both badges URL shapes", () => {
+    assert.deepEqual(idsFor("https://steamcommunity.com/my/badges/"), ["cards"]);
+    assert.deepEqual(idsFor("https://steamcommunity.com/id/someone/badges/"), ["cards"]);
+  });
+  it("stays off the inventory and the market", () => {
+    assert.ok(!idsFor("https://steamcommunity.com/id/someone/inventory/").includes("cards"));
+    assert.ok(!idsFor("https://steamcommunity.com/market/").includes("cards"));
   });
 });

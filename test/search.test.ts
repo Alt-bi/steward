@@ -8,6 +8,7 @@ import {
   batchingRatio,
   groupForSearch,
   groupIdsFromResults,
+  learnGroupForItem,
   pricesFromResults,
   queryForItem,
   searchUrl,
@@ -174,5 +175,68 @@ describe("batchingRatio", () => {
 
   it("is one for an empty set rather than dividing by zero", () => {
     assert.equal(batchingRatio([]), 1);
+  });
+});
+
+describe("learnGroupForItem, over the wire", () => {
+  it("asks search by the stripped name and hands back the exact row's group id", async () => {
+    const { resetEnv, setAcquire, setSteam, jsonReply } = await import("./support/env");
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+    const urls: string[] = [];
+    setSteam((url) => {
+      urls.push(url);
+      return jsonReply({
+        success: true,
+        results: [
+          {
+            hash_name: "AK-47 | Redline (Field-Tested)",
+            sell_price: 12000,
+            asset_description: { market_bucket_group_id: "G1807209A023004" },
+          },
+          {
+            hash_name: "AK-47 | Redline (Minimal Wear)",
+            asset_description: { market_bucket_group_id: "G1807209A023004" },
+          },
+        ],
+      });
+    });
+
+    const id = await learnGroupForItem(item("AK-47 | Redline (Field-Tested)"), {});
+    assert.equal(id, "G1807209A023004");
+    assert.equal(urls.length, 1, "one item costs one request");
+    assert.ok(urls[0]!.includes("query=AK-47%20%7C%20Redline"), "the query is the stripped name");
+  });
+
+  it("teaches nothing from a near miss", async () => {
+    const { resetEnv, setAcquire, setSteam, jsonReply } = await import("./support/env");
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+    setSteam(() =>
+      jsonReply({
+        success: true,
+        results: [
+          {
+            /** A different wear — close, but not the hash we asked for. */
+            hash_name: "AK-47 | Redline (Well-Worn)",
+            sell_price: 9000,
+            asset_description: { market_bucket_group_id: "G1807209A023004" },
+          },
+        ],
+      })
+    );
+
+    const id = await learnGroupForItem(item("AK-47 | Redline (Field-Tested)"), {});
+    assert.equal(id, null, "a sibling's group id is a guess, and guesses get one thing wrong");
+  });
+
+  it("treats throttle or markup as simply not learning", async () => {
+    const { resetEnv, setAcquire, setSteam } = await import("./support/env");
+    await resetEnv();
+    setAcquire(() => ({ ok: false as const, waitMs: 0, reason: "blocked" as const }));
+
+    const id = await learnGroupForItem(item("Chroma Case"), {});
+    assert.equal(id, null, "the caller keeps its unknown; the failure is not its to wear");
+    void setSteam;
   });
 });

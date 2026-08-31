@@ -7,7 +7,8 @@ import { loadSettings, type Settings } from "../../../core/settings";
 import type { Cents, ItemKeyed, Listing, RepricePlan } from "../../../core/types";
 import { needsConfirmation, removeListing, sellItem } from "../../../steam/actions";
 import { scanCompetitors } from "../../../steam/listings";
-import { forgetGroup, knownGroup } from "../../../steam/grouping";
+import { forgetGroup, knownGroup, learnGroups } from "../../../steam/grouping";
+import { learnGroupForItem } from "../../../steam/search";
 import { applyAssetRefs, fetchMyListings, listingsOnPage } from "../../../steam/mylistings";
 import { allowSteamTraffic, sleep, SteamError, type WaitReason } from "../../../steam/net";
 import { currencyId, feeConfig, refreshPage, sessionId, waitForPage } from "../../../steam/page-context";
@@ -41,6 +42,15 @@ import {
 
 /** Listing pages opened in parallel when the market minimum turned out to be ours. */
 const EXACT_CONCURRENCY = 2;
+
+/**
+ * Apps whose book answers only to the internal group id, not to
+ * `market_hash_name`. Going to search for the id costs one request per item,
+ * so the detour is paid for where the wall is proven and not anywhere else —
+ * TF2, Steam items and community goods answer by hash name directly and would
+ * only burn budget on a detour they never need.
+ */
+const GROUP_ID_APPS = new Set<number>([730]);
 
 /**
  * Whether the listing book is answering at all.
@@ -466,7 +476,25 @@ async function mount(ctx: FeatureContext): Promise<void> {
         const group = unsettled[next++];
         if (!group) return;
         /** A learned internal name, when Steam stopped answering this hash directly. */
-        const known = await knownGroup(group.appid, group.hash);
+        let known = await knownGroup(group.appid, group.hash);
+        /**
+         * Nothing learned yet and this app is the one that hides behind group
+         * ids — go ask the only endpoint that hands them out. Search answers
+         * even when it settles no price, and once learned the id persists, so
+         * the wall is paid for once per item, not once per scan.
+         */
+        if (!known && GROUP_ID_APPS.has(group.appid) && !state.abort) {
+          status(`Учу внутренний id · ${group.name}`, "work");
+          requests += 1;
+          const learned = await learnGroupForItem(
+            { key: group.key, appid: group.appid, hash: group.hash, name: group.name },
+            pacing
+          );
+          if (learned) {
+            known = learned;
+            learnGroups(group.appid, new Map([[group.hash, learned]]));
+          }
+        }
         /** Already proven unanswerable for this app; the request would come back empty. */
         if (unnamedApps.has(group.appid) && !known) {
           hitUnnamed.add(group.appid);

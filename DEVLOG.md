@@ -1,3 +1,24 @@
+## 2.21.1 — reprice learns the group id itself
+
+The bucket fact was proven but unreachable: `priceAndPlan` runs the exact pass
+with `cacheOnly`, so search never fires before the book, and a CS skin with no
+previously learned id hits `unnamed` and gets skipped — for every user who has
+never run a price search with the panel open. The fix is a recovery step inside
+the exact worker: when the store holds no group id for a 730 item, `learnGroupForItem
+` fires one `search/render` by the stripped name and takes the `market_bucket_group_id`
+off the row whose hash matches exactly — a sibling wear teaches nothing, because
+the row we did not ask for is a guess with one thing wrong in it.
+
+A learned id persists in the naming store, so the search costs one request per
+item across the whole life of the install, not per scan. Throttled or markup
+search replies are not a failure to wear: the worker keeps its unknown, which is
+what it had before the request existed. Three over-the-wire tests cover the wire:
+the exact-row match, the near miss, and the blocked acquire.
+
+Stays at one search per item per pass: batching would collapse a CS portfolio to
+one request, but the answer needs the exact hash anyway, and a family query that
+404s would black out five wears at once.
+
 
 ## 2.21.0 follow-up — the bucket question, closed by live evidence
 

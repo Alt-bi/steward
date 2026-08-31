@@ -171,3 +171,30 @@ export async function fetchGroupPrices(
   });
   return { prices: pricesFromResults(data.results), groupIds: groupIdsFromResults(data.results) };
 }
+
+/**
+ * Ask search for one item and take only what it can teach for free: the
+ * internal group id Steam answers its book with. Prices are ignored here —
+ * the caller already decided the cheap passes settled nothing, and a miss in
+ * search is not a failure worth a verdict, just a fact we did not learn.
+ *
+ * This is the recovery path for the naming wall: appid 730 answers its book
+ * only by group id, and a reprice that never searched has nothing to ask with.
+ * One request per item, and a hash with no row in the answer teaches nothing
+ * rather than guessing from a near miss — `groupIdsFromResults` matches on the
+ * exact `hash_name` for that reason.
+ */
+export async function learnGroupForItem(
+  item: ItemKeyed,
+  pacing: Pacing
+): Promise<string | null> {
+  const group = groupForSearch([item])[0];
+  if (!group) return null;
+  try {
+    const { groupIds } = await fetchGroupPrices(group, pacing);
+    return groupIds.get(item.hash) ?? null;
+  } catch {
+    /** Throttle, markup, a sorry page — nothing of it changes the answer: unknown. */
+    return null;
+  }
+}

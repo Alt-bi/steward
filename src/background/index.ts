@@ -111,8 +111,15 @@ const handlers: Handlers = {
       if (tab.id === undefined) continue;
       try {
         const reply = (await chrome.tabs.sendMessage(tab.id, { __cmrelay: true, payload: req })) as
-          | { ok?: boolean; note?: string }
+          | { ok?: boolean; note?: string; extVersion?: string }
           | undefined;
+        // A chat tab opened before the last extension update still runs the
+        // OLD content script - it would send old bytes while we believe the
+        // opposite. Refuse to route through an orphaned relay (an unversioned
+        // relay predates the handshake, so it is orphaned by definition).
+        if (reply && reply.extVersion !== chrome.runtime.getManifest().version) {
+          return { ok: false, error: "вкладка чата старая - обнови её (F5)" };
+        }
         if (reply && reply.ok) return { ok: true, sent: true, note: reply.note };
         // The chat answered and said "Steam does not see it" — that is an
         // answer, not a missing tab. Carry the receipt, do not swallow it.

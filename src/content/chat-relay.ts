@@ -28,6 +28,9 @@ interface RelayPayload {
 
 const isChat = () => location.pathname.startsWith("/chat") || location.pathname.startsWith("/family");
 
+/** This relay's build — the worker refuses bridges from an older orphaned script. */
+const relayVersion = () => chrome.runtime.getManifest().version as string;
+
 /** Ask the MAIN bridge and wait for its -reply. */
 function bridgeCall(type: string, extra: Record<string, unknown>): Promise<{ ok?: boolean; note?: string }> {
   return new Promise((resolve) => {
@@ -60,21 +63,20 @@ export function mountChatRelay(): void {
     if (!m || m.__cmrelay !== true || !m.payload) return false;
     const payload = m.payload;
     void (async () => {
+      const stamp = (r: object): object => Object.assign({}, r, { extVersion: relayVersion() });
       if (payload.verify) {
-        sendResponse(await bridgeCall("cm-play/verify", {}));
+        sendResponse(stamp(await bridgeCall("cm-play/verify", {})));
         return;
       }
       if (payload.replay && payload.replay.length) {
-        sendResponse(await bridgeCall("cm-play/replay", { bytes: payload.replay }));
+        sendResponse(stamp(await bridgeCall("cm-play/replay", { bytes: payload.replay })));
         return;
       }
       if (payload.stop) {
-        const res = await bridgeCall("cm-play/stop", {});
-        sendResponse(res);
+        sendResponse(stamp(await bridgeCall("cm-play/stop", {})));
         return;
       }
-      const res = await bridgeCall("cm-play/start", { entries: payload.entries });
-      sendResponse(res);
+      sendResponse(stamp(await bridgeCall("cm-play/start", { entries: payload.entries })));
     })();
     return true; // async response
   });

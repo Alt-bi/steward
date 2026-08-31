@@ -1065,3 +1065,52 @@ the ring with their golden 742, and we diff their bytes against ours to
 see exactly which fields their server fills that we cannot guess. Until
 that diff exists, the chat engine stays honest-marked: it sends, and says
 plainly when Steam ignores it.
+
+
+## 2.29.0 — byte-for-byte: what a working farm actually sends
+
+The capture ring paid for itself. The user ran SteamLVLUP's factory on their
+own profile; our MAIN bridge on /chat recorded their real ClientGamesPlayed
+frame (243 bytes, EMsg 742, TWENTY games in one packet). Decoded against our
+encoder, three silent divergences fell out:
+
+- the second u32 is the HEADER length, not the whole payload (we wrote 275)
+- the protobuf header rides RAW, not wrapped in a length-delimited field
+- the golden body is minimal: 0a 09 11 <appid LE> per game — no is_secure,
+  no client_os_type, no names
+
+Steam silently drops frames whose framing it cannot parse; that was why
+"claimed 20" and nothing farmed. The encoder now reproduces the golden frame
+byte-for-byte (offline diff against the recorded capture: equal). Tests pin
+the header from the live 703 dump and the body from the golden frame.
+
+One more fact from the gold: their sessionid is a foreign (server) session
+and Steam accepts it — the socket and steamid carry the trust, the sid does
+not have to be ours.
+
+## 2.29.1 — the receipt stops lying with "?"
+
+The panel printed "profile: ?" because the worker swallowed the verify note
+when Steam's answer was negative (ok:false lost note). The worker now carries
+the receipt through, and the tab shows the real profile state instead of a
+question mark — the whole point of the verify loop was honesty.
+
+Also shipped: a "replay golden" button. It takes the longest foreign 742 from
+the capture ring — SteamLVLUP's own frame — and pushes it verbatim through our
+socket pipe. It is the isolation experiment: same bytes, our pipe. If the
+golden bytes land, the difference was in our encoder; if even those get
+ignored, their server session is load-bearing and we say so plainly. Replay
+picks the LONGEST foreign frame so the 23-byte stop frames never get picked.
+
+## 2.29.2 — never shoot through an orphaned relay
+
+An extension update does not migrate content scripts in open tabs. After
+edge://extensions Update, the chat tab still runs the OLD relay and the OLD
+page bridge — which happily sends the old, wrong bytes while the worker and
+the panel believe 2.29 framing shipped. The receipt was therefore lying on
+stale tabs.
+
+Now every relay reply is stamped with chrome.runtime.getManifest().version,
+and the worker refuses to route through a relay stamped with a different
+version: "the chat tab is old — refresh it (F5)". The handshake is cheap and
+it makes the upgrade story one instruction instead of a silent failure mode.

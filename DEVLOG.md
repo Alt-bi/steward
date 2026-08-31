@@ -858,3 +858,23 @@ and mostly are not:
   "listings vanish when SIH is on"). Feature parity with a page-scraper is
   the wrong target; parity with what the *user* does is the right one, and
   that is the bar the three shipped versions moved.
+
+## 2.23.0 — mylistings walks every page
+
+The comment said "deliberately not the old paginating loop", and for the account
+it was written for that was right: a blind crawl spends the budget the prices
+need. Live probes changed the calculus — `total_count: 725` while one answer
+carried 100 ids, so `complete` never became true, ownership stayed "unknown"
+and the self-undercut guard ran permanently on half the truth.
+
+The walk: page 0 first, and one request per further page only while Steam keeps
+naming new listing ids. An account that fits in one answer pays exactly one
+request — the old behavior; a 727-lot account pays eight and gets a true
+`complete`. A repeated page means Steam is done serving; an interruption or a
+refusal mid-walk never reports completion, just like every other half-answer
+here. Page ids come from the active set only — held and to-confirm lots are
+ours but are not in `total_count`, and folding them into completeness was the
+easy way to hide a missing page.
+
+`seen` is now part of `MyListingsPage`: the same set `complete` is measured
+against, which the walk needs to tell "new" from "again".

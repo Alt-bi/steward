@@ -200,3 +200,61 @@ describe("mylistings over the wire, in the shape Steam sends today", () => {
     });
   });
 });
+
+describe("mylistings walks every page when the account needs them", () => {
+  /** A 100-lot account answering `count=10` a page, ten pages deep. */
+  const TOTAL = 100;
+
+  function pageAnswer(start: number, size: number, idOf: (n: number) => string) {
+    const hovers: string[] = [];
+    for (let i = 0; i < size; i++) {
+      const n = start + i;
+      hovers.push(
+        `	CreateItemHoverFromContainer( g_rgAssets, 'mylisting_${idOf(n)}_name', 730, '2', '${40000 + n}', 1 );`
+      );
+    }
+    return {
+      success: true,
+      pagesize: size,
+      start,
+      total_count: TOTAL,
+      num_active_listings: TOTAL,
+      hovers: hovers.join("\n"),
+    };
+  }
+
+  function startOf(url: string): number {
+    return Number(new URL(url).searchParams.get("start") ?? 0);
+  }
+
+  beforeEach(async () => {
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+  });
+
+  it("pays one request when the account fits in the answer", async () => {
+    setSteam((url) => ({ status: 200, body: JSON.stringify(pageAnswer(startOf(url), 10, (n) => String(90000000 + n))) }));
+    const page = await fetchMyListings(10, {});
+    assert.equal(page.ids.size, TOTAL);
+    assert.equal(page.complete, true);
+    assert.equal(calls.filter((u) => u.includes("mylistings")).length, TOTAL / 10);
+  });
+
+  it("stops as soon as a page repeats itself", async () => {
+    /** Steam claiming 100 and repeating page one is Steam being done. */
+    setSteam(() => ({ status: 200, body: JSON.stringify(pageAnswer(0, 10, (n) => String(90000000 + n))) }));
+    const page = await fetchMyListings(10, {});
+    assert.equal(page.ids.size, 10);
+    assert.equal(page.complete, false);
+    assert.equal(calls.filter((u) => u.includes("mylistings")).length, 2);
+  });
+
+  it("passes an interruption through, mid-walk, so the run stops cleanly", async () => {
+    let asks = 0;
+    setSteam((url) => ({ status: 200, body: JSON.stringify(pageAnswer(startOf(url), 10, (n) => String(90000000 + n))) }));
+    await assert.rejects(
+      fetchMyListings(10, { abort: () => ++asks > 3 }),
+      (err: unknown) => err instanceof SteamError && err.kind === "aborted"
+    );
+  });
+});

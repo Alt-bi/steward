@@ -1,6 +1,6 @@
 import { parseMoneyToCents } from "../core/money";
 import type { Cents, Listing, SteamAssetIndex } from "../core/types";
-import { fetchJson, type Pacing } from "./net";
+import { fetchJson, SteamError, type Pacing } from "./net";
 import { assetIndex, lookupAsset } from "./page-context";
 
 /**
@@ -277,6 +277,13 @@ export interface MyListingsPage {
   /** Every listing id Steam named. */
   ids: Set<string>;
   /**
+   * Only the *active* ids this answer showed — the same measure `complete` is
+   * judged against. Held and to-confirm lots are ours but Steam does not
+   * count them in `total_count`, so folding them into a completeness count
+   * would let a pending confirmation hide missing pages.
+   */
+  seen?: Set<string>;
+  /**
    * The answer covered every listing we hold, so a listing id outside `ids` is
    * definitely somebody else's.
    *
@@ -365,6 +372,7 @@ export function myListingsFrom(data: MyListingsResponse): MyListingsPage {
   return {
     refs,
     ids,
+    seen,
     /**
      * No total at all means we cannot claim to have seen everything. A total of
      * zero, on the other hand, is Steam saying there is nothing to see — and an
@@ -375,17 +383,71 @@ export function myListingsFrom(data: MyListingsResponse): MyListingsPage {
 }
 
 /**
- * One request for our own listings: the asset references the page hid, and the
- * full set of our listing ids.
+ * Our own listings: the asset references the page hid, and the full set of our
+ * listing ids.
  *
- * Deliberately not the old paginating loop: no aliases, no second page. What is
- * not in this answer is reported as not known, not fetched — a scan must not turn
- * into a crawl of the whole market history.
+ * One page is fetched when one page covers the account, and every page is
+ * walked when it does not. That used to be backwards: the loop was cut to a
+ * single page to spare the budget, and as a result an account with 725 lots
+ * never learned `complete` — which is the one fact that tells a stranger's lot
+ * at our price from our own lot on the next page. Guessing wrong there is
+ * bidding against ourselves, so the few requests are worth it. The walk stops
+ * on its own: it only continues while pages keep bringing new ids, so an
+ * account that fits in one answer pays exactly one request.
  */
 export async function fetchMyListings(count: number, pacing: Pacing): Promise<MyListingsPage> {
   const size = Math.min(100, Math.max(10, count));
+  const first = await myListingsPage(0, size, pacing);
+  if (first.page.complete || !first.expectMore) return first.page;
+
+  /** Steam's own pages, however many it says there are. */
+  const total = first.total;
+  const seen = new Set(first.page.seen ?? first.page.ids);
+  const page: MyListingsPage = {
+    refs: new Map(first.page.refs),
+    ids: new Set(first.page.ids),
+    seen,
+    complete: false,
+  };
+
+  for (let start = size; start < total; start += size) {
+    let next: Awaited<ReturnType<typeof myListingsPage>>;
+    try {
+      next = await myListingsPage(start, size, pacing);
+    } catch (err) {
+      /** A half-told story is not a story: better incomplete than wrong. */
+      if (err instanceof SteamError && (err.kind === "aborted" || err.kind === "blocked")) throw err;
+      break;
+    }
+    let fresh = 0;
+    for (const id of next.page.seen ?? next.page.ids) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        fresh += 1;
+      }
+    }
+    for (const id of next.page.ids) page.ids.add(id);
+    for (const [id, ref] of next.page.refs) if (!page.refs.has(id)) page.refs.set(id, ref);
+    /** A page that said "100 more" and brought nothing new is Steam being done. */
+    if (!next.expectMore || fresh === 0) break;
+  }
+
+  page.complete = first.expectMore && seen.size >= total;
+  return page;
+}
+
+/** One page, plus whether Steam claims there is more behind it. */
+async function myListingsPage(
+  start: number,
+  size: number,
+  pacing: Pacing
+): Promise<{
+  page: MyListingsPage;
+  expectMore: boolean;
+  total: number;
+}> {
   const data = await fetchJson<MyListingsResponse>(
-    `https://steamcommunity.com/market/mylistings?start=0&count=${size}`,
+    `https://steamcommunity.com/market/mylistings?start=${start}&count=${size}`,
     {
       kind: "mylistings",
       ...pacing,
@@ -410,7 +472,9 @@ export async function fetchMyListings(count: number, pacing: Pacing): Promise<My
       },
     }
   );
-  return myListingsFrom(data);
+  const total = toInt(data.total_count) || toInt(data.num_active_listings);
+  const page = myListingsFrom(data);
+  return { page, expectMore: total > page.ids.size && page.ids.size >= size, total };
 }
 
 /** Joins the three half-answers Steam gives us into whole listings. */

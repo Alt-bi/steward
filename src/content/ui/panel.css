@@ -4,7 +4,9 @@
   right: 16px;
   z-index: 2147483000;
   width: 440px;
+  min-width: 320px;
   max-width: calc(100vw - 24px);
+  resize: horizontal;
   max-height: calc(100vh - 110px);
   display: flex;
   flex-direction: column;

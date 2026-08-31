@@ -431,12 +431,14 @@ async function mount(ctx: FeatureContext): Promise<void> {
     );
 
     const picked = sellable ? pickedInGroup(group) : 0;
+    const wear = wearOf(group);
     const why =
       low == null
         ? "цена не получена"
         : `${money(low)} за штуку` +
           (view.sellable < group.count ? ` · продаётся ${view.sellable} из ${group.count}` : "") +
-          (pick === "some" ? ` · выбрано ${picked} из ${view.sellable}` : "");
+          (pick === "some" ? ` · выбрано ${picked} из ${view.sellable}` : "") +
+          (wear ? ` · ${wear}` : "");
 
     /** One stack, one click, without disturbing the rest of the selection. */
     const quick = el("button", "stw-btn stw-btn-thin", "продать");
@@ -478,6 +480,21 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
   let stopWatching: (() => void) | null = null;
   let stopPicking: (() => void) | null = null;
+
+  /**
+   * Wear spread across one stack, e.g. `float 0.15–0.38`. Empty when Steam
+   * did not answer or the stack holds no wearable copies — a stack without
+   * wear is normal and stays quiet.
+   */
+  function wearOf(group: InventoryGroup): string {
+    if (!state.wears.size) return "";
+    const wears: WearInfo[] = [];
+    for (const item of group.items) {
+      const wear = state.wears.get(item.assetid);
+      if (wear) wears.push(wear);
+    }
+    return wearChip(wears) ?? "";
+  }
 
   /**
    * Steam paginates the inventory client-side, so a repaint has to follow its
@@ -779,6 +796,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
         /** Wear decorates; it never fails the scan over itself. */
       }
     }
+    renderRows();
     repaintBadges();
   }
 

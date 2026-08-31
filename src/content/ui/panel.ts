@@ -15,6 +15,7 @@ export interface Section {
 
 const ROOT_ID = "stw-root";
 const POSITION_KEY = "stwPanelPos";
+const WIDTH_KEY = "stwPanelWidth";
 
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -63,6 +64,7 @@ export class Panel {
 
     this.restorePosition();
     this.makeDraggable(head);
+    this.rememberWidth();
   }
 
   addSection(id: string, title: string): Section {
@@ -108,10 +110,16 @@ export class Panel {
   private restorePosition(): void {
     try {
       const raw = localStorage.getItem(POSITION_KEY);
-      if (!raw) return;
-      const pos = JSON.parse(raw) as { left: number; top: number };
-      if (!Number.isFinite(pos.left) || !Number.isFinite(pos.top)) return;
-      this.applyPosition(pos.left, pos.top);
+      if (raw) {
+        const pos = JSON.parse(raw) as { left: number; top: number };
+        if (Number.isFinite(pos.left) && Number.isFinite(pos.top)) {
+          this.applyPosition(pos.left, pos.top);
+        }
+      }
+      const w = Number(localStorage.getItem(WIDTH_KEY));
+      if (Number.isFinite(w) && w >= 320 && w <= window.innerWidth - 24) {
+        this.root.style.width = `${w}px`;
+      }
     } catch {
       /* a stale value must never keep the panel off screen */
     }
@@ -153,6 +161,26 @@ export class Panel {
         /* private mode */
       }
     });
+  }
+
+  /**
+   * The panel can be dragged wider by its bottom-right corner (`resize:
+   * horizontal` in CSS). Whatever changes the box — the grip or a drag —
+   * the width is remembered so a wide table stays wide next visit.
+   */
+  private rememberWidth(): void {
+    let saved = 0;
+    const observer = new ResizeObserver((entries) => {
+      const width = Math.round(entries[0]?.contentRect.width ?? 0);
+      if (width <= 0 || width === saved) return;
+      saved = width;
+      try {
+        localStorage.setItem(WIDTH_KEY, String(width));
+      } catch {
+        /* private mode */
+      }
+    });
+    observer.observe(this.root);
   }
 }
 

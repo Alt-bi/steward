@@ -826,3 +826,14 @@ launched — and the two independent sources of one number were cross-checked.
   probe reads 8127 as 81277068 and invents a parser bug. The real parser
   tokenizes by MONEY_TOKEN; do not trust quick probes on money text.
 
+
+## 2.22.2 — the panel bends to the screen
+
+The panel was 440px of fixed pride — a CS table with wear ranges
+wanted more. `resize: horizontal` plus a remembered width (localStorage,
+same ritual as position): drag the bottom-right corner once, every page
+after opens that wide. Clamp guards the restore (>=320, <=viewport).
+
+Wear reached the rows list too: a stack reads
+`81,27 за штуку · float 0.15-0.38`, so the float that decorates the tile
+explains itself in the row without a second glance at the grid.

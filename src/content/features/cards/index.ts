@@ -281,20 +281,20 @@ async function mount(ctx: FeatureContext): Promise<void> {
           busy = false;
           return;
         }
-        // "sent" is not "accepted": ws.send never fails, Steam can ignore us.
-        // Ask Steam itself through our own public profile — that In-Game line
-        // is what a friend, and the drop counter, sees.
-        status(`Заявлено ${chosen.length} — проверяем, верит ли Steam…`, "work");
-        await sleep(4000);
-        const v = await send("cm/play", { stop: false, verify: true, entries: [] });
-        if (v.ok) {
-          status("Steam видит: " + (("note" in v && v.note) || "In-Game") + " — жди дроп, жми «пересчитать»", "ok");
-        } else {
-          status(
-            "Steam НЕ видит игру (профиль: " + (("note" in v && v.note) || "?") + "). Кадр ушёл, но Steam его игнорирует",
-            "warn"
-          );
-        }
+        // "sent" is not "accepted", but neither is the profile banner a valid
+        // receipt: a web-client games-played frame credits drops and shows
+        // friends "playing" WITHOUT raising the profile "In Game" banner — the
+        // byte-identical golden frame from Card Factory behaves the same. The
+        // only honest receipt is drops actually decrementing: rescan («пересчитать»).
+        status(
+          `Заявлено ${chosen.length} в чат-клиент — держи чат открытым. Дропы считаются по «пересчитать» (профиль может быть «Online», даже когда ферма идёт)`,
+          "work"
+        );
+        void (async () => {
+          const v = await send("cm/play", { stop: false, verify: true, entries: [] });
+          if (v.ok) status("Steam видит: " + (("note" in v && v.note) || "In-Game") + " — жми «пересчитать»", "ok");
+          // When the banner stays "Online" we say nothing: it proves nothing.
+        })();
         busy = false;
       })();
       return;

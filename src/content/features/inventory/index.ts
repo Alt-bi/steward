@@ -48,7 +48,7 @@ import {
   watchForRepaint,
   watchTilePicks,
 } from "./badges";
-import { resolveHistories, unknownHistories } from "../../../steam/histories";
+import { defaultAsk, loadHistories } from "../../../steam/history-load";
 import type { HistoryStats } from "../../../steam/pricehistory";
 import { needsHistory } from "../../../core/sell";
 import { buildSellPlans, plannedProceeds, type SellPlan } from "./plan";
@@ -73,12 +73,6 @@ import {
  * badges glued onto Steam's item tiles, so it keeps working when Steam reshuffles
  * its markup.
  */
-
-/** `pricehistory` runs about this many a minute, so a run can be quoted in advance. */
-const HISTORY_PER_MIN = 6;
-
-/** Above this many unknown histories the run is confirmed with its cost first. */
-const HISTORY_ASK_ABOVE = 12;
 
 /** Steam keeps wear on real copies for this app only, so nothing else pays for it. */
 const WEAR_APPID = 730;
@@ -617,42 +611,34 @@ async function mount(ctx: FeatureContext): Promise<void> {
       return;
     }
 
-    const missing = await unknownHistories(items);
-    if (missing.length > HISTORY_ASK_ABOVE) {
-      const minutes = Math.max(1, Math.ceil(missing.length / HISTORY_PER_MIN));
-      const ok = window.confirm(
-        `Истории продаж не хватает у ${missing.length} предм.` +
-          `\n\nЭто ${missing.length} запрос(ов), примерно ${minutes} мин. ` +
-          "Быстрее нельзя: это самый строгий лимит Steam." +
-          "\n\nОтветы держатся несколько часов, повтор будет бесплатным. Качаем?"
-      );
-      if (!ok) return;
-    }
-
     state.abort = false;
     setBusy(true);
-    const quiet = await allowSteamTraffic();
-    if (quiet) {
-      status(quiet, "warn");
+
+    const outcome = await loadHistories(items, {
+      ...pacing,
+      onProgress: (done, total, label) => status(`История ${done}/${total} · ${label}`, "work"),
+    }, { ask: defaultAsk });
+
+    if (outcome.stopped === "declined") {
+      setBusy(false);
+      return;
+    }
+    if (outcome.stopped === "quiet") {
+      status(outcome.gateMessage, "warn");
       setBusy(false);
       return;
     }
 
     try {
-      const result = await resolveHistories(items, {
-        ...pacing,
-        onProgress: (done, total, label) => status(`История ${done}/${total} · ${label}`, "work"),
-      });
-      Object.assign(state.stats, result.stats);
+      Object.assign(state.stats, outcome.stats);
       replan();
       const known = items.filter((i) => state.stats[i.key] != null).length;
-      const spent = `Запросов ${result.requests}${result.fromCache ? `, из кэша ${result.fromCache}` : ""}.`;
-      status(
-        result.stopped === "blocked"
-          ? `Steam отказал: история есть у ${known} из ${items.length}. Не повторяй сразу. ${spent}`
-          : `История есть у ${known} из ${items.length}. ${spent}`,
-        result.stopped === "blocked" ? "warn" : "ok"
-      );
+      const spent = `Запросов ${outcome.requests}${outcome.fromCache ? `, из кэша ${outcome.fromCache}` : ""}.`;
+      if (outcome.stopped === "blocked") {
+        status(`Steam отказал: история есть у ${known} из ${items.length}. Не повторяй сразу. ${spent}`, "warn");
+      } else {
+        status(`История есть у ${known} из ${items.length}. ${spent}`, "ok");
+      }
     } catch (err) {
       status(`История: ${describeError(err)}`, "err");
     } finally {

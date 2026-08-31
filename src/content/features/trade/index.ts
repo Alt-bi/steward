@@ -323,6 +323,11 @@ async function mount(ctx: FeatureContext): Promise<void> {
 register({
   id: "trade",
   title: "Трейд",
-  matches: (url) => url.pathname.startsWith("/tradeoffer"),
+  /**
+   * Only an open offer: root-level `/tradeoffer/new` or `/tradeoffer/{id}`. The
+   * old prefix match also caught `/tradeoffers` itself, mounting the inbox
+   * feature and this one side by side on the same page.
+   */
+  matches: (url) => /^\/tradeoffer(\/|$)/.test(url.pathname),
   mount,
 });

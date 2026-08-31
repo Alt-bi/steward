@@ -12,7 +12,7 @@ import { learnGroupForItem } from "../../../steam/search";
 import { applyAssetRefs, fetchMyListings, listingsOnPage } from "../../../steam/mylistings";
 import { allowSteamTraffic, sleep, SteamError, type WaitReason } from "../../../steam/net";
 import { currencyId, feeConfig, refreshPage, sessionId, waitForPage } from "../../../steam/page-context";
-import { resolveHistories, unknownHistories } from "../../../steam/histories";
+import { loadHistories } from "../../../steam/history-load";
 import { fetchMarketLows, priceCacheKey } from "../../../steam/prices";
 import type { HistoryStats } from "../../../steam/pricehistory";
 import { el, type StatusKind } from "../../ui/panel";
@@ -75,9 +75,6 @@ const bookLiveness = new BookLiveness();
  * the budget the prices needed.
  */
 const unnamedApps = new Set<number>();
-
-/** `pricehistory` runs about this many a minute, so a run can be quoted in advance. */
-const HISTORY_PER_MIN = 6;
 
 /** Above this many unknown histories the run is confirmed with its cost first. */
 const ASK_ABOVE = 12;
@@ -888,51 +885,44 @@ async function mount(ctx: FeatureContext): Promise<void> {
     }
 
     const items = uniqueItems();
-    const missing = await unknownHistories(items);
-    if (!missing.length) {
-      state.stats = (await resolveHistories(items)).stats;
-      replan();
-      status(`История уже есть по всем ${items.length} предметам — запросов не было.`, "ok");
-      return;
-    }
-
-    if (missing.length > ASK_ABOVE) {
-      const minutes = Math.max(1, Math.ceil(missing.length / HISTORY_PER_MIN));
-      const ok = window.confirm(
-        `История продаж есть не для всех: не хватает ${missing.length} предм.\n\n` +
-          `Это ${missing.length} запрос(ов) к Steam, примерно ${minutes} мин. ` +
-          "Это самый медленный запрос — быстрее нельзя, иначе Steam выдаёт бан на часы.\n\n" +
-          "Ответы сохраняются на несколько часов, второй раз будет бесплатно. Качаем?"
-      );
-      if (!ok) return;
-    }
-
     state.abort = false;
     setBusy(true);
-    const quiet = await allowSteamTraffic();
-    if (quiet) {
-      status(quiet, "warn");
-      setBusy(false);
-      return;
-    }
 
     try {
-      const result = await resolveHistories(items, {
+      const outcome = await loadHistories(items, {
         ...pacing,
+        askAbove: ASK_ABOVE,
         onProgress: (done, total, label) => status(`История ${done}/${total} · ${label}`, "work"),
+      }, {
+        /** This tab warns about the hour-long pricehistory ban — its own wording. */
+        ask: (missing, minutes) => window.confirm(
+          `История продаж есть не для всех: не хватает ${missing} предм.\n\n` +
+            `Это ${missing} запрос(ов) к Steam, примерно ${minutes} мин. ` +
+            "Это самый медленный запрос — быстрее нельзя, иначе Steam выдаёт бан на часы.\n\n" +
+            "Ответы сохраняются на несколько часов, второй раз будет бесплатно. Качаем?"
+        ),
       });
-      Object.assign(state.stats, result.stats);
+
+      if (outcome.stopped === "declined") return;
+      if (outcome.stopped === "quiet") {
+        status(outcome.gateMessage, "warn");
+        return;
+      }
+
+      Object.assign(state.stats, outcome.stats);
       replan();
 
       const known = Object.values(state.stats).filter((s) => s != null).length;
-      const spent = `Запросов ${result.requests}${result.fromCache ? `, из кэша ${result.fromCache}` : ""}.`;
-      if (result.stopped === "blocked") {
+      const spent = `Запросов ${outcome.requests}${outcome.fromCache ? `, из кэша ${outcome.fromCache}` : ""}.`;
+      if (outcome.missing === 0) {
+        status(`История уже есть по всем ${items.length} предметам — запросов не было.`, "ok");
+      } else if (outcome.stopped === "blocked") {
         status(
           `Steam отказал: история есть у ${known} из ${items.length}. ` +
             `Не повторяй сразу — бан на pricehistory самый длинный. ${spent}`,
           "warn"
         );
-      } else if (result.stopped === "aborted") {
+      } else if (outcome.stopped === "aborted") {
         status(`Остановлено: история есть у ${known} из ${items.length}. ${spent}`, "");
       } else {
         status(

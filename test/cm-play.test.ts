@@ -7,6 +7,7 @@ import {
   buildGamesPlayedFrame,
   frameEMsg,
   gamesPlayedBody,
+  inGameFromProfileHtml,
   protoBufHeader,
 } from "../src/page/cm-play-core";
 
@@ -37,6 +38,18 @@ describe("cm-play-core", () => {
     // game_id is field 2 fixed64 per Valve's proto, not a varint in field 1
     const body = gamesPlayedBody([{ appid: 99000, secure: false, name: "" }]);
     assert.equal(body[0], 0x0a); // games_played = field 1, length-delimited
+  });
+
+  it("the profile receipt says what Steam sees", () => {
+    const playing =
+      '<div class="profile_in_game_header">In-Game</div><div class="profile_in_game_name">CHUCHEL</div>';
+    const online = '<div class="profile_in_game_header">Currently Online</div>';
+    const off = "<div>no badge at all</div>";
+    assert.equal(inGameFromProfileHtml(playing).inGame, true);
+    assert.equal(inGameFromProfileHtml(playing).name, "CHUCHEL");
+    assert.equal(inGameFromProfileHtml(online).inGame, false);
+    assert.equal(inGameFromProfileHtml(online).state, "Currently Online");
+    assert.equal(inGameFromProfileHtml(off).state, "unknown");
   });
 
   it("frameEMsg refuses garbage", () => {

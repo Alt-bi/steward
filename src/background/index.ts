@@ -113,7 +113,7 @@ const handlers: Handlers = {
         const reply = (await chrome.tabs.sendMessage(tab.id, { __cmrelay: true, payload: req })) as
           | { ok?: boolean; note?: string }
           | undefined;
-        if (reply && reply.ok) return { ok: true, sent: true };
+        if (reply && reply.ok) return { ok: true, sent: true, note: reply.note };
       } catch {
         /* a chat tab without our content script (or asleep) — try the next */
       }

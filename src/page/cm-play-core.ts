@@ -110,3 +110,16 @@ export function frameEMsg(bytes: Uint8Array): number {
 
 /** postMessage bridge name; the MAIN script and the content script agree on it. */
 export const cmPlayBridgeName = "stw-cm-play";
+
+/**
+ * Read the one line that matters from a public profile page: does Steam think
+ * this account is playing something right now? This is what a friend sees —
+ * and what the drop counter trusts. ws.send() is a transport fact; this is the
+ * receipt.
+ */
+export function inGameFromProfileHtml(html: string): { inGame: boolean; state: string; name?: string } {
+  const header = /profile_in_game_header">([^<]*)</.exec(html);
+  const name = /profile_in_game_name">([^<]*)</.exec(html);
+  const state = (header?.[1] ?? "unknown").trim();
+  return { inGame: /In-Game/i.test(state), state, name: name?.[1]?.trim() };
+}

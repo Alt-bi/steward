@@ -19,6 +19,8 @@ const BRIDGE = cmPlayBridgeName;
 
 interface RelayPayload {
   stop: boolean;
+  /** Ask Steam (via our own profile page) whether it sees us In-Game. */
+  verify?: boolean;
   entries: { appid: number; playing: boolean; secure: boolean; offline: boolean }[];
 }
 
@@ -56,6 +58,10 @@ export function mountChatRelay(): void {
     if (!m || m.__cmrelay !== true || !m.payload) return false;
     const payload = m.payload;
     void (async () => {
+      if (payload.verify) {
+        sendResponse(await bridgeCall("cm-play/verify", {}));
+        return;
+      }
       if (payload.stop) {
         const res = await bridgeCall("cm-play/stop", {});
         sendResponse(res);

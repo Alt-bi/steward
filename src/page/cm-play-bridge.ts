@@ -3,6 +3,7 @@ import {
   cmPlayBridgeName,
   frameEMsg,
   EM_GAMES_PLAYED,
+  inGameFromProfileHtml,
   type CmIds,
   type PlayEntry,
 } from "./cm-play-core";
@@ -56,6 +57,7 @@ let playing: PlayEntry[] = [];
 let keepTimer: number | null = null;
 /** Set while WE call ws.send, so the hook tags the frame as ours. */
 let oursPending = false;
+
 function ourSend(ws: WebSocket, frame: Uint8Array): void {
   oursPending = true;
   try {
@@ -105,6 +107,27 @@ function replayRaw(bytes: number[]): { ok: boolean; note?: string } {
   if (!ws) return { ok: false, note: "open the chat (steamcommunity.com/chat) first" };
   ws.send(new Uint8Array(bytes));
   return { ok: true, note: "raw frame injected" };
+}
+
+/**
+ * The honest receipt: ask Steam itself whether it thinks we are playing.
+ * Same-origin fetch of our public profile — the In-Game line there is exactly
+ * what a friend (and the drop counter) sees. ws.send() lies; this does not.
+ */
+async function verify(): Promise<{ ok: boolean; note?: string }> {
+  const ids = cmIds();
+  if (!ids) return { ok: false, note: "no chat session" };
+  try {
+    const res = await fetch(`https://steamcommunity.com/profiles/${ids.steamid}?l=english`, {
+      credentials: "include",
+      cache: "no-store",
+    });
+    const seen = inGameFromProfileHtml(await res.text());
+    if (seen.inGame) return { ok: true, note: "In-Game" + (seen.name ? ": " + seen.name : "") };
+    return { ok: false, note: seen.state };
+  } catch (e) {
+    return { ok: false, note: "profile check failed: " + String(e) };
+  }
 }
 
 const KEEPALIVE_MS = 25_000;
@@ -157,7 +180,15 @@ window.addEventListener("message", (event: MessageEvent) => {
         ? stop()
         : d.type === "cm-play/replay"
           ? replayRaw(d.bytes || [])
-          : null;
+          : d.type === "cm-play/verify"
+            ? null // async; handled below
+            : null;
+  if (d.type === "cm-play/verify") {
+    void verify().then((r) => {
+      window.postMessage({ source: cmPlayBridgeName + "-reply", type: d.type, steamid: ids?.steamid ?? null, ...r }, "*");
+    });
+    return;
+  }
   if (result) {
     window.postMessage({ source: cmPlayBridgeName + "-reply", type: d.type, steamid: ids?.steamid ?? null, ...result }, "*");
   }

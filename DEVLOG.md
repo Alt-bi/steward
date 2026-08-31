@@ -1033,3 +1033,35 @@ press Start once in their UI on the working profile and Steward saves their
 real 742 bytes into the session ring; comparing theirs against ours, byte
 for byte, closes the gap with evidence, not guesses. steam://run remains the
 zero-doubt path meanwhile.
+
+## 2.28.1 — the panel no longer lies about "claimed"
+
+The user hit it twice: "Заявлено 20 — держи вкладку чата открытой", yet
+nothing drops. The label was a lie of omission — `ws.send()` returns true
+whenever the socket is open, steam or not. We never knew whether Steam
+accepted the packet, and on the bot profile a full sweep proved it does
+**not**: raw 742 frames with bare appid, with secure/offline flags, with
+game_id carrying the GameID type bits (`appid | 1<<24`) — none of them ever
+flipped the public profile to In-Game. A real `steam://run` flips it in
+seconds. Steam treats a foreign `ClientGamesPlayed` as noise unless it
+carries launch-time proof we cannot forge from the browser.
+
+So this release is about honesty first:
+
+- **inGameFromProfileHtml** — parse the one line that matters from the
+  public profile page (what a friend sees, and what the drop counter
+  trusts). Pure function, tested on both live states (Currently Online and
+  In-Game: CHUCHEL from a real run).
+- After claiming, the tab waits four seconds and **asks Steam itself**
+  through the chat's authenticated fetch: the status now says
+  `Steam видит: In-Game: …` or `Steam НЕ видит игру (профиль: …). Кадр
+  ушёл, но Steam его игнорирует` — a warning, not a fake green light.
+- The `cm/play` envelope carries `note` end to end (bridge → relay →
+  worker → tab).
+
+The path to the real fix runs through the capture ring shipped in 2.28.0:
+one Start press in Card Factory on a profile that also runs Steward fills
+the ring with their golden 742, and we diff their bytes against ours to
+see exactly which fields their server fills that we cannot guess. Until
+that diff exists, the chat engine stays honest-marked: it sends, and says
+plainly when Steam ignores it.

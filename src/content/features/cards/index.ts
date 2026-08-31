@@ -267,12 +267,25 @@ async function mount(ctx: FeatureContext): Promise<void> {
           stop: false,
           entries: chosen.map((id) => ({ appid: Number(id), playing: true, secure: true, offline: false })),
         });
-        status(
-          r.ok
-            ? `Заявлено ${chosen.length} — держи вкладку чата открытой`
-            : ("Чат не принял заявку: " + ("error" in r ? r.error : "?")),
-          r.ok ? "ok" : "err"
-        );
+        if (!r.ok) {
+          status("Чат не принял заявку: " + ("error" in r ? r.error : "?"), "err");
+          busy = false;
+          return;
+        }
+        // "sent" is not "accepted": ws.send never fails, Steam can ignore us.
+        // Ask Steam itself through our own public profile — that In-Game line
+        // is what a friend, and the drop counter, sees.
+        status(`Заявлено ${chosen.length} — проверяем, верит ли Steam…`, "work");
+        await sleep(4000);
+        const v = await send("cm/play", { stop: false, verify: true, entries: [] });
+        if (v.ok) {
+          status("Steam видит: " + (("note" in v && v.note) || "In-Game") + " — жди дроп, жми «пересчитать»", "ok");
+        } else {
+          status(
+            "Steam НЕ видит игру (профиль: " + (("note" in v && v.note) || "?") + "). Кадр ушёл, но Steam его игнорирует",
+            "warn"
+          );
+        }
         busy = false;
       })();
       return;

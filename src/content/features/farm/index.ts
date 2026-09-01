@@ -38,6 +38,9 @@ interface FarmState {
   log: { at: number; text: string }[];
   leader: string;
   leaderAt: number;
+  /** Why the last rotation tick failed — the status line must show it. */
+  lastErr?: string;
+  lastErrAt?: number;
 }
 
 const EMPTY: FarmState = {
@@ -161,13 +164,21 @@ register({
         leaderBlocked
           ? "Фабрика ведёт другая вкладка чата. Это пройдёт само: живая вкладка заявляет о себе каждые 10 секунд, мёртвая освобождает фабрику в течение ~30. Хочешь сейчас — «Забрать себе»."
           : state.running
-            ? `Фабрика идёт: в игре ${state.playing.length}, в очереди ${state.queue.length} · скан каждые ${Math.round(SCAN_MS / 60000)} мин`
+            ? state.playing.length === 0
+              ? `Крутится, но чат не ставит ни одной игры${state.lastErr ? `: ${state.lastErr}` : ""} — журнал ниже`
+              : `Фабрика идёт: в игре ${state.playing.length}, в очереди ${state.queue.length} · скан каждые ${Math.round(SCAN_MS / 60000)} мин`
             : state.playing.length
               ? `Пауза: ${state.playing.length} игр заявлено, ротация стоит`
               : state.queue.length || state.auto
                 ? "Фабрика готова — «Старт»"
                 : "Очередь пуста: «Сканировать» → отметь игры → «Отмеченные → в фабрику», или включи авто-режим",
-        leaderBlocked ? "warn" : state.running ? "work" : ""
+        leaderBlocked
+          ? "warn"
+          : state.running
+            ? state.playing.length || !state.lastErr
+              ? "work"
+              : "err"
+            : ""
       );
 
       info.textContent = "";
@@ -304,6 +315,8 @@ register({
           queue: next.queue,
           leader: instanceId,
           leaderAt: Date.now(),
+          lastErr: "",
+          lastErrAt: 0,
           names: { ...state.names, ...Object.fromEntries(byAppid) },
           log,
         });
@@ -321,9 +334,11 @@ register({
       } catch (err) {
         const state = await readFarm();
         await writeFarm({
+          lastErr: String((err as Error).message || err).slice(0, 160),
+          lastErrAt: Date.now(),
           log: pushLog({ ...state, log: [] }, `сбой цикла: ${(err as Error).message?.slice(0, 80) || err}`),
         });
-        setStatus("Цикл фабрики ошибся — см. журнал ниже", "err");
+        setStatus(`Цикл ошибся: ${(err as Error).message?.slice(0, 90) || err} — см. журнал`, "err");
       } finally {
         busy = false;
       }
@@ -452,10 +467,11 @@ register({
     // silent — closed tab, F5, extension update, Edge sleep), this tab adopts
     // and rotates on its own. The user should never have to press «Забрать
     // себе»: the button stays only as a manual override for a live second tab.
-    // Hidden tabs deliberately do not steal the lease, so a throttled
-    // background tab cannot start a bidding war with the tab on screen.
+    // Background tabs adopt too — the farm is usually kept in a background
+    // tab, and a lease only a visible tab can heal is a lock again. Browser
+    // timer throttling just slows a background adoption to ~1 min, which the
+    // 30 s stale window tolerates.
     window.setInterval(() => {
-      if (document.visibilityState !== "visible") return;
       void adoptIfOurs();
     }, WATCHDOG_MS);
 

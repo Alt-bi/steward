@@ -1199,3 +1199,13 @@ behind "another chat tab runs it" with a dead "take over" button.
 - heartbeat storm fix: storage.onChanged no longer triggers a 20-page badge
   scan per 10 s heartbeat (that rate-limited Steam and ate the first scan)
 - popup "card factory" reuses the open chat tab instead of piling duplicates
+
+## 2.30.4 - the watchdog wakes in the dark, and the status tells the truth
+- the 5 s watchdog only healed leases in VISIBLE tabs — the farm tab is a
+  background tab, so a dead lease stayed a lock forever; adoption now runs in
+  background tabs too (browser throttling stretches it to ~1 min, fine)
+- honest status: last rotation error is saved to storage (lastErr) and shown
+  red while running («остановлено на ошибке: ...») instead of the fake
+  «Фабрика идёт: в игре 0, в очереди 10»; cm/play errors also go to the log
+- proof on the live chat profile: 2.30.4 scans (401 badges), auto-picks 8
+  games, plays all 8, queue drains to 0

@@ -1435,3 +1435,12 @@ prices item by item through the competitor book («Смотрю чужие ло�
 Surprised Hana (Металлическая) · бюджет запросов 4с»), «Стоп» halts it cleanly:
 «Остановлено: проверено 14 из 642. Запросов 16». 681 tests pass; the two
 reprice-market tests now feed the SSR JSON shape instead of a drawn table.
+
+## 2.36.2 — the freeze admits itself
+
+A 60-minute scan died at 300/642, and the budget got blamed. It was Edge: the
+screen locked, the tab went `hidden`, and the browser froze our timers mid-
+`budget wait 5с`. The status line promised five seconds and served them for
+sixty minutes. Now the note reads "табка уснула — разбуди её" whenever the
+pause is older than the machine's clock can account for: a frozen pause is
+reported as frozen, not as a promise.

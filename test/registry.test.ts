@@ -6,8 +6,8 @@ import { DEFAULT_SETTINGS } from "../src/core/settings";
 
 /** Importing the features is what registers them. */
 import "../src/content/features/reprice";
-import "../src/content/features/buyorders";
 import "../src/content/features/inventory";
+import "../src/content/features/offers";
 import "../src/content/features/trade";
 import "../src/content/features/listing";
 import "../src/content/features/cards";
@@ -21,12 +21,13 @@ describe("feature routing", () => {
   it("registers every feature exactly once", () => {
     const ids = allFeatures().map((f) => f.id);
     assert.deepEqual([...new Set(ids)].sort(), ids.slice().sort(), "no duplicate registrations");
-    assert.deepEqual(ids.slice().sort(), ["buyorders", "cards", "farm", "inventory", "listing", "reprice", "trade"]);
+    assert.deepEqual(ids.slice().sort(), ["cards", "farm", "inventory", "listing", "offers", "reprice", "trade"]);
   });
 
-  it("puts reprice and buy orders on the market front page", () => {
-    /** Both tables live there: our listings and our standing orders. */
-    assert.deepEqual(idsFor("https://steamcommunity.com/market/"), ["reprice", "buyorders"]);
+  it("puts the factory alone on the market front page", () => {
+    /** The buy-order tab died with the old market: it read a DOM table Steam
+     * no longer draws anywhere. One honest tab, everywhere on /market. */
+    assert.deepEqual(idsFor("https://steamcommunity.com/market/"), ["reprice"]);
   });
 
   it("keeps the buy-order tab off the market subpages that have no orders", () => {
@@ -64,7 +65,7 @@ describe("feature routing", () => {
   it("honours a feature turned off in settings, and only that one", () => {
     const off = { ...DEFAULT_SETTINGS, features: { reprice: false } };
     const ids = activeFeatures(new URL("https://steamcommunity.com/market/"), off).map((f) => f.id);
-    assert.deepEqual(ids, ["buyorders"]);
+    assert.deepEqual(ids, []);
   });
 });
 describe("cards routing", () => {

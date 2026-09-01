@@ -77,10 +77,21 @@ export function needsExactCheck(low: CompetitorLow | undefined): boolean {
  * An endpoint being gone and a connection being noisy are different facts, and
  * only the first deserves permanence. Two markups in a row with nothing good
  * between them is a pattern; one is weather.
+ *
+ * And even the pattern expires. Measured 2026-09-01: the market homepage is the
+ * *second* stage of a throttle whose first stage is an empty book, and both are
+ * over within a minute of leaving the endpoint alone. A verdict that only a
+ * fresh «Сканировать лоты» could clear meant every «Догрузить цены» after a
+ * bad minute returned instantly, asked nothing, and printed a refusal that had
+ * happened minutes ago — «Запросов 0» under a sentence describing two replies
+ * nobody had just received.
  */
 export class BookLiveness {
+  /** How long «the book is refusing» may stand before it is worth asking again. */
+  static readonly TTL_MS = 120_000;
+
   private htmlStreak = 0;
-  private gone = false;
+  private goneAt = 0;
   /**
    * The last page that arrived where JSON belongs, named by its own title.
    * A sorry-page, an age wall and a robot check all look identical from here
@@ -92,25 +103,31 @@ export class BookLiveness {
   /** A new scan is the user asking again; a dead verdict expires with the last one. */
   restart(): void {
     this.htmlStreak = 0;
-    this.gone = false;
+    this.goneAt = 0;
     this.lastMarkup = "";
   }
 
-  get dead(): boolean {
-    return this.gone;
+  dead(now = Date.now()): boolean {
+    return this.waitMs(now) > 0;
+  }
+
+  /** How long is left of the verdict, in ms. Zero means ask again. */
+  waitMs(now = Date.now()): number {
+    if (!this.goneAt) return 0;
+    return Math.max(0, this.goneAt + BookLiveness.TTL_MS - now);
   }
 
   /** Called for each HTML-as-JSON answer the book gives. */
-  sawMarkup(note?: string): void {
+  sawMarkup(note?: string, now = Date.now()): void {
     this.htmlStreak += 1;
     if (note) this.lastMarkup = note;
-    if (this.htmlStreak >= 2) this.gone = true;
+    if (this.htmlStreak >= 2) this.goneAt = now;
   }
 
   /** One answered book means the endpoint is alive and every past markup was noise. */
   sawAnswer(): void {
     this.htmlStreak = 0;
-    this.gone = false;
+    this.goneAt = 0;
   }
 }
 

@@ -122,3 +122,78 @@ export function inGameFromProfileHtml(html: string): { inGame: boolean; state: s
   const state = (header?.[1] ?? "unknown").trim();
   return { inGame: /In-Game/i.test(state), state, name: name?.[1]?.trim() };
 }
+
+// --- reading frames back ---------------------------------------------------
+
+/** One protobuf varint at `at`; null when the bytes run out mid-number. */
+function readVarint(bytes: Uint8Array, at: number): { value: bigint; next: number } | null {
+  let value = 0n;
+  let shift = 0n;
+  for (let i = at; i < bytes.length && i - at < 10; i++) {
+    const b = bytes[i]!;
+    value |= BigInt(b & 0x7f) << shift;
+    if ((b & 0x80) === 0) return { value, next: i + 1 };
+    shift += 7n;
+  }
+  return null;
+}
+
+export interface FrameHeader {
+  emsg: number;
+  /** steamid64 as decimal string, when the header carried one. */
+  steamid: string | null;
+  /** the CM session id, as the signed int32 Steam means. */
+  sessionid: number | null;
+}
+
+/**
+ * Read EMsg and the CMsgProtoBufHeader ids out of ANY proto-framed CM message.
+ *
+ * This is the load-bearing fallback: `g_FriendsUIApp.m_CMInterface.m_Session`
+ * is Steam's private field name and it has no contract with us. Every frame
+ * the chat itself sends — heartbeats included — carries the same two ids in
+ * its header, so sniffing one outgoing frame tells us who we are without
+ * reading a single Steam internal.
+ */
+export function readFrameHeader(bytes: Uint8Array): FrameHeader | null {
+  if (bytes.length < 8) return null;
+  const word = (bytes[0]! | (bytes[1]! << 8) | (bytes[2]! << 16) | (bytes[3]! << 24)) >>> 0;
+  if ((word & 0x80000000) === 0) return null; // plain (non-protobuf) framing
+  const emsg = word & 0x7fffffff;
+  const hlen = (bytes[4]! | (bytes[5]! << 8) | (bytes[6]! << 16) | (bytes[7]! << 24)) >>> 0;
+  const end = Math.min(8 + hlen, bytes.length);
+
+  let i = 8;
+  let steamid: string | null = null;
+  let sessionid: number | null = null;
+  while (i < end) {
+    const tag = readVarint(bytes, i);
+    if (!tag) break;
+    i = tag.next;
+    const field = Number(tag.value >> 3n);
+    const wire = Number(tag.value & 7n);
+    if (wire === 0) {
+      const v = readVarint(bytes, i);
+      if (!v) break;
+      i = v.next;
+      if (field === 2) sessionid = Number(BigInt.asIntN(64, v.value)) | 0;
+    } else if (wire === 1) {
+      if (i + 8 > end) break;
+      if (field === 1) {
+        let x = 0n;
+        for (let k = 7; k >= 0; k--) x = (x << 8n) | BigInt(bytes[i + k]!);
+        steamid = x.toString();
+      }
+      i += 8;
+    } else if (wire === 2) {
+      const len = readVarint(bytes, i);
+      if (!len) break;
+      i = len.next + Number(len.value);
+    } else if (wire === 5) {
+      i += 4;
+    } else {
+      break;
+    }
+  }
+  return { emsg, steamid, sessionid };
+}

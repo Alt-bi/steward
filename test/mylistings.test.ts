@@ -2,10 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  applyAssetRefs,
   assembleListings,
-  assetRefsFromListinginfo,
-  listingsOnPage,
   myListingsFrom,
   parseHovers,
   pricesFromListingText,
@@ -49,12 +46,6 @@ describe("assembleListings", () => {
   });
 });
 
-describe("listingsOnPage", () => {
-  it("returns nothing when Steam has not painted a listings table", () => {
-    assert.deepEqual(listingsOnPage(), []);
-  });
-});
-
 describe("pricesFromListingText", () => {
   it("reads the classic two-line cell: buyer on top, you-receive below", () => {
     assert.deepEqual(pricesFromListingText("3,00 pуб.\n2,58 pуб."), { buyer: 300, seller: 258 });
@@ -93,60 +84,6 @@ describe("pricesFromListingText", () => {
   it("returns zeros when the row has no money at all", () => {
     assert.deepEqual(pricesFromListingText("3 hours ago"), { buyer: 0, seller: 0 });
     assert.deepEqual(pricesFromListingText(""), { buyer: 0, seller: 0 });
-  });
-});
-
-describe("assetRefsFromListinginfo", () => {
-  it("maps a listing id to the item behind it", () => {
-    const refs = assetRefsFromListinginfo({
-      "42": { listingid: "42", asset: { appid: 730, contextid: "2", id: "99" } },
-    });
-    assert.deepEqual(refs.get("42"), { appid: 730, contextid: "2", assetid: "99" });
-  });
-
-  it("skips a row with no asset, instead of inventing one", () => {
-    const refs = assetRefsFromListinginfo({ "42": { listingid: "42" }, "43": {} });
-    assert.equal(refs.size, 0);
-  });
-
-  it("falls back to context 2, which is where game inventories live", () => {
-    const refs = assetRefsFromListinginfo({ "7": { asset: { appid: 440, id: "5" } } });
-    assert.equal(refs.get("7")?.contextid, "2");
-  });
-});
-
-describe("applyAssetRefs", () => {
-  function listing(id: string, assetid: string) {
-    return {
-      listingId: id,
-      appid: 730,
-      contextid: "2",
-      assetid,
-      amount: 1,
-      name: "Chroma Case",
-      hash: "Chroma Case",
-      ourBuyer: 1000,
-      ourSeller: 850,
-      publisherFeePercent: 0.1,
-    };
-  }
-
-  it("fills in only what the page could not resolve", () => {
-    const listings = [listing("1", ""), listing("2", "already-known")];
-    const refs = new Map([
-      ["1", { appid: 730, contextid: "16", assetid: "55" }],
-      ["2", { appid: 730, contextid: "2", assetid: "should-not-win" }],
-    ]);
-    assert.equal(applyAssetRefs(listings, refs), 1);
-    assert.equal(listings[0]!.assetid, "55");
-    assert.equal(listings[0]!.contextid, "16", "the context comes with the asset");
-    assert.equal(listings[1]!.assetid, "already-known");
-  });
-
-  it("leaves a listing empty when the answer says nothing about it", () => {
-    const listings = [listing("9", "")];
-    assert.equal(applyAssetRefs(listings, new Map()), 0);
-    assert.equal(listings[0]!.assetid, "");
   });
 });
 

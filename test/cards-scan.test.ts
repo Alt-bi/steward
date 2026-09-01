@@ -3,9 +3,18 @@ import "./support/env";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { beforeEach, describe, it } from "node:test";
 
-import { badgeRowFrom, badgesPageFrom, dropsDelta, farmableRows, totalBadgesFrom } from "../src/steam/badges";
+import { resetEnv, setSteam } from "./support/env";
+
+import {
+  badgeRowFrom,
+  badgesPageFrom,
+  dropsDelta,
+  farmableRows,
+  scanBadges,
+  totalBadgesFrom,
+} from "../src/steam/badges";
 
 /**
  * The badges page, as the rewritten community actually serves it.
@@ -123,5 +132,51 @@ describe("dropsDelta — the farming receipt", () => {
 
   it("never calls a growing counter a drop", () => {
     assert.equal(dropsDelta(new Map([[440, 1]]), [row(440, 3)]).size, 0);
+  });
+});
+
+describe("scanBadges — when is a walk actually complete", () => {
+  beforeEach(async () => {
+    await resetEnv();
+  });
+
+  const page = (rowsHtml: string, showing: string) =>
+    `<html><body>${rowsHtml}<div class="badge_pagination">${showing}</div></body></html>`;
+  const badge = (appid: number, drops: number) =>
+    `<div id="badge_gamebadge_${appid}_1_0"><div class="badge_title">G${appid}&nbsp;<span>` +
+    `<span class="progress_info_bold">${drops} card drops remaining</span></div>`;
+
+  it("a page that parsed to nothing is NOT a complete scan", async () => {
+    // Steam moved the markup (or served a wall). Zero rows read as a complete
+    // scan told the rotation engine every game had finished at once — the
+    // factory retired itself and banned every game from ever coming back.
+    setSteam(() => ({ status: 200, body: "<html><body>nothing we recognise</body></html>" }));
+    const scan = await scanBadges({ maxPages: 3 });
+    assert.deepEqual(scan.rows, []);
+    assert.equal(scan.complete, false);
+  });
+
+  it("a shelf Steam itself calls empty IS complete", async () => {
+    setSteam(() => ({ status: 200, body: page("", "Showing 0-0 of 0 badges") }));
+    const scan = await scanBadges({ maxPages: 3 });
+    assert.equal(scan.totalBadges, 0);
+    assert.equal(scan.complete, true);
+  });
+
+  it("a short final page still completes the walk", async () => {
+    setSteam((url) =>
+      url.includes("p=1")
+        ? { status: 200, body: page(badge(730, 2) + badge(440, 1), "Showing 1-2 of 9 badges") }
+        : { status: 200, body: page("", "Showing 1-2 of 9 badges") }
+    );
+    const scan = await scanBadges({ maxPages: 3 });
+    assert.equal(scan.rows.length, 2);
+    assert.equal(scan.complete, true);
+  });
+
+  it("the page ceiling is still an incomplete walk", async () => {
+    setSteam(() => ({ status: 200, body: page(badge(730, 2), "Showing 1-1 of 900 badges") }));
+    const scan = await scanBadges({ maxPages: 2 });
+    assert.equal(scan.complete, false);
   });
 });

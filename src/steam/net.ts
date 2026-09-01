@@ -261,7 +261,18 @@ async function fetchRaw(url: string, opts: FetchOptions & { html?: boolean }): P
   }
   /** Only a caller expecting JSON can call markup a failure. */
   if (!opts.html && /^\s*<(!DOCTYPE|html)/i.test(text)) {
-    reportOutcome(opts.kind, "error", `not_json ${url}`);
+    /**
+     * Reported as a throttle, not as an error.
+     *
+     * A Steam endpoint that answers a page where JSON belongs is refusing, not
+     * failing: measured on 2026-09-01, `QueryListingsForItem` degrades in two
+     * steps under a burst — first an empty book, then the market homepage as
+     * markup. Filed as a plain error the governor kept the same pace straight
+     * into the wall, which is how a scan of ten items got two homepages in
+     * three requests. The thrown error stays `not_json`, so callers that read
+     * the page's own title still do.
+     */
+    reportOutcome(opts.kind, "rate_limited", `not_json ${url}`);
     /** The page names itself; carrying that out costs nothing and ends the guessing. */
     throw new SteamError("not_json", undefined, { status: res.status, note: markupNote(text) });
   }

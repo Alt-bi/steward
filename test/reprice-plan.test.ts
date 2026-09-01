@@ -426,14 +426,14 @@ describe("BookLiveness", () => {
      */
     const live = new BookLiveness();
     live.sawMarkup();
-    assert.equal(live.dead, false, "a single HTML page must not stop the run");
+    assert.equal(live.dead(), false, "a single HTML page must not stop the run");
   });
 
   it("calls the endpoint dead only after a second markup with nothing between", () => {
     const live = new BookLiveness();
     live.sawMarkup();
     live.sawMarkup();
-    assert.equal(live.dead, true, "a pattern, not a one-off");
+    assert.equal(live.dead(), true, "a pattern, not a one-off");
   });
 
   it("lets one answered book wash the streak away", () => {
@@ -441,16 +441,36 @@ describe("BookLiveness", () => {
     live.sawMarkup();
     live.sawAnswer();
     live.sawMarkup();
-    assert.equal(live.dead, false, "the endpoint answered in between; this is noise again");
+    assert.equal(live.dead(), false, "the endpoint answered in between; this is noise again");
   });
 
   it("clears a dead verdict when the user asks again", () => {
     const live = new BookLiveness();
     live.sawMarkup();
     live.sawMarkup();
-    assert.equal(live.dead, true);
+    assert.equal(live.dead(), true);
     live.restart();
-    assert.equal(live.dead, false, "a fresh scan is allowed to find it alive again");
+    assert.equal(live.dead(), false, "a fresh scan is allowed to find it alive again");
+  });
+
+  it("lets the verdict expire on its own, without anyone asking again", () => {
+    /**
+     * «Догрузить цены» does not restart the verdict, and it should not have to:
+     * the refusal it describes is a throttle that is over within a minute. As a
+     * flag only a fresh scan could clear, it turned every later press into an
+     * instant refusal that asked Steam nothing — «Запросов 0» under a sentence
+     * about two replies nobody had just received.
+     */
+    const t0 = 1_000_000;
+    const live = new BookLiveness();
+    live.sawMarkup(undefined, t0);
+    live.sawMarkup("Сообщество Steam :: Торговая площадка сообщества Steam", t0);
+
+    assert.equal(live.dead(t0), true);
+    assert.equal(live.dead(t0 + BookLiveness.TTL_MS - 1), true, "внутри окна — молчим");
+    assert.equal(live.waitMs(t0 + 30_000), BookLiveness.TTL_MS - 30_000);
+    assert.equal(live.dead(t0 + BookLiveness.TTL_MS), false, "окно вышло — снова спрашиваем");
+    assert.equal(live.waitMs(t0 + BookLiveness.TTL_MS), 0);
   });
 
   it("carries the page's own name out with the verdict", () => {

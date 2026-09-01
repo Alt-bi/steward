@@ -32,7 +32,7 @@ openFarm.addEventListener("click", () => {
   // farm/open reuses an open chat tab (activates it and pushes the hash) —
   // chrome.tabs.create here would pile up duplicate chat tabs, and every
   // duplicate is one more ghost that can hold the farm lease.
-  void send("farm/open", { appids: [] });
+  void send("farm/open", {});
 });
 
 function fill(settings: Settings): void {

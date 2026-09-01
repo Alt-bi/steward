@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { describeError, describeRelistFailure } from "../src/content/ui/errors";
+import { isOrphanError } from "../src/content/ui/orphan";
 import { SteamError } from "../src/steam/net";
 
 describe("describeError", () => {
@@ -88,5 +89,24 @@ describe("a write that never came back", () => {
     const answered = describeRelistFailure("removing", new SteamError("http", "remove_failed"));
     assert.equal(answered.stranded, false);
     assert.equal(answered.halt, false);
+  });
+});
+
+describe("isOrphanError — the severed bridge, not Steam", () => {
+  it("names every wording Chrome uses for a content script left behind", () => {
+    // An extension update does not migrate running content scripts; all three
+    // of these mean the same thing and all three used to reach the console
+    // once per farm watchdog tick, forever.
+    assert.equal(isOrphanError(new Error("Extension context invalidated.")), true);
+    assert.equal(isOrphanError(new Error("Could not establish connection. Receiving end does not exist.")), true);
+    assert.equal(isOrphanError(new Error("The message port closed before a response was received.")), true);
+    assert.equal(isOrphanError("Extension context invalidated"), true);
+  });
+
+  it("never mistakes a Steam failure for an orphaned page", () => {
+    assert.equal(isOrphanError(new SteamError("rate_limited")), false);
+    assert.equal(isOrphanError(new Error("network_failed")), false);
+    assert.equal(isOrphanError(null), false);
+    assert.equal(isOrphanError(undefined), false);
   });
 });

@@ -101,10 +101,29 @@ export function totalBadgesFrom(body: string): number | null {
   return m ? toInt(m[1]!) : null;
 }
 
+/**
+ * Where the walk is right now.
+ *
+ * Reported twice per page — once before the fetch, once after it parsed —
+ * because the badges gate paces this to a few pages a minute: a caller that
+ * only hears about finished pages shows a frozen panel for ten seconds at a
+ * time, which is indistinguishable from a hang.
+ */
+export interface BadgeScanProgress {
+  /** 1-based page. */
+  page: number;
+  /** Badge rows read so far, across all pages. */
+  rows: number;
+  /** What Steam says the shelf holds; known once page 1 has been read. */
+  total: number | null;
+  /** False while this page is still in flight (queued behind the rate gate). */
+  read: boolean;
+}
+
 export interface BadgeScanOptions extends Pacing {
   /** Hard page ceiling; a farm account with absurd libraries stops here. */
   maxPages?: number;
-  onProgress?: (rows: number, total: number | null) => void;
+  onProgress?: (progress: BadgeScanProgress) => void;
 }
 
 const FIRST_PAGE = "https://steamcommunity.com/my/badges/?l=english&p=1";
@@ -120,12 +139,27 @@ export async function scanBadges(opts: BadgeScanOptions): Promise<BadgeScan> {
 
   for (let page = 1; page <= maxPages; page++) {
     const url = page === 1 ? FIRST_PAGE : FIRST_PAGE.replace("p=1", `p=${page}`);
+    opts.onProgress?.({ page, rows: rows.length, total, read: false });
     const body = await fetchText(url, { kind: "badges", ...opts });
     const pageRows = badgesPageFrom(body);
     if (page === 1) total = totalBadgesFrom(body);
     rows.push(...pageRows);
-    opts.onProgress?.(rows.length, total);
-    if (!pageRows.length) return { rows, totalBadges: total, complete: true };
+    opts.onProgress?.({ page, rows: rows.length, total, read: true });
+    if (!pageRows.length) {
+      /**
+       * A page that parsed to nothing ends the walk — but it is only a
+       * COMPLETE walk when we already read rows, or when Steam itself says the
+       * shelf is empty («Showing 0 of 0 badges»).
+       *
+       * The difference is the whole factory. Markup that moved under us parses
+       * to zero rows too, and calling that complete tells the rotation engine
+       * that every game in the bench finished at once: it evicts them all,
+       * marks them finished forever, and closes the factory with «дропов нигде
+       * не осталось». One changed class name would have retired a farm that
+       * still owed hundreds of cards.
+       */
+      return { rows, totalBadges: total, complete: rows.length > 0 || total === 0 };
+    }
     if (total !== null && rows.length >= total) {
       return { rows, totalBadges: total, complete: true };
     }

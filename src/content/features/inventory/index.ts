@@ -38,7 +38,7 @@ import {
 } from "../../../steam/page-context";
 import { fetchMarketLows } from "../../../steam/prices";
 import { fetchWear, wearChip, type WearInfo } from "../../../steam/floats";
-import { el, type StatusKind } from "../../ui/panel";
+import { el, field, narrowField, type StatusKind } from "../../ui/panel";
 import { describeError, haltsRun, outcomeUnknown } from "../../ui/errors";
 import { register, type FeatureContext } from "../registry";
 import {
@@ -148,7 +148,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   const gameRow = el("div", "stw-controls");
   const gameSelect = document.createElement("select");
   gameSelect.className = "stw-select";
-  gameRow.appendChild(gameSelect);
+  gameRow.appendChild(field("Игра", gameSelect, "Что читать: инвентарь выбранной игры"));
 
   /** Strategy lives in the panel because it is changed per pass, not once. */
   const controls = el("div", "stw-controls");
@@ -198,7 +198,13 @@ async function mount(ctx: FeatureContext): Promise<void> {
     "Сохранить то, что видно, таблицей: предмет, кол-во, цена, износ. Открывается в Excel.";
   csvBtn.addEventListener("click", () => exportCsv());
 
-  controls.append(strategySelect, amountInput, perItemInput, historyBtn, csvBtn);
+  controls.append(
+    field("Стратегия", strategySelect, "Как считать цену выставления"),
+    narrowField("Шаг", amountInput, amountInput.title),
+    narrowField("Штук", perItemInput, perItemInput.title),
+    historyBtn,
+    csvBtn
+  );
 
   /**
    * Filtering and sorting are what turn a page of two hundred stacks into a
@@ -225,7 +231,10 @@ async function mount(ctx: FeatureContext): Promise<void> {
     option.textContent = label;
     sortSelect.appendChild(option);
   }
-  filterRow.append(queryInput, sortSelect);
+  filterRow.append(
+    field("Фильтр", queryInput, queryInput.title),
+    field("Сортировка", sortSelect)
+  );
 
   function checkbox(text: string, title: string): { label: HTMLElement; input: HTMLInputElement } {
     const label = el("label", "stw-toggle");

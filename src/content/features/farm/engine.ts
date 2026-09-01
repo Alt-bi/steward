@@ -9,23 +9,17 @@ export interface FarmTickInput {
   /** False while pagination hiccuped: a missing row proves nothing then. */
   scanComplete: boolean;
   prevPlaying: readonly number[];
-  /** User-pinned games, ahead of everything else; order is the user's. */
-  queued: readonly number[];
-  /** Games the user explicitly removed — they never come back on their own. */
-  dropped: ReadonlySet<number>;
-  /** Farm everything the scan says is farmable, not just the pinned queue. */
-  auto: boolean;
   max?: number;
 }
 
 export interface FarmTickResult {
-  /** New claimed set. Swap the chat only when it differs from prevPlaying. */
+  /** New claimed set. Swap the chat only when it differs from the wire. */
   playing: number[];
   /** Games that finished right now — the scan says they owe nothing. */
   finishedNow: number[];
-  /** The queue going forward; finished and dropped games are gone. */
-  queue: number[];
-  /** Nothing plays and nothing waits. */
+  /** Still owed, but the bench is full; they ride in as slots free up. */
+  waiting: number[];
+  /** Nothing left to play. */
   done: boolean;
 }
 
@@ -53,24 +47,36 @@ function truthOf(rows: readonly BadgeRow[]): ScanTruth {
   return { owed, seen, order };
 }
 
-/** Appids that still owe at least one drop, in scan order. */
-export function farmableOrder(rows: readonly BadgeRow[]): number[] {
-  const t = truthOf(rows);
-  return t.order.filter((a) => t.owed.has(a));
+/**
+ * Does the chat socket need to be told a new set?
+ *
+ * `claimed` is what the socket says it carries — `null` when the bridge did
+ * not answer, and then the only safe answer is yes: an unanswered bridge is
+ * an unclaimed account, and skipping the push is how a factory farms nothing
+ * while reporting that it farms. Order does not matter to Steam, so a
+ * reordered bench is not a change.
+ */
+export function claimChanged(next: readonly number[], claimed: readonly number[] | null): boolean {
+  if (claimed === null) return true;
+  if (next.length !== claimed.length) return true;
+  const a = [...next].sort((x, y) => x - y);
+  const b = [...claimed].sort((x, y) => x - y);
+  return a.some((v, i) => v !== b[i]);
 }
 
 /**
  * One tick of the factory: who plays now, who just finished.
  *
+ * There is one rule and no modes: **every game the scan says still owes cards
+ * gets farmed**, bench first, up to `max`. The queue, the tick-list and the
+ * forever-ban list are gone — they were three ways for the user to end up with
+ * a running factory that had quietly excluded every game it could farm.
+ *
  * A game counts as finished only when the evidence is good: a badge row that
  * exists and says zero, or a row that vanished from a COMPLETE scan. Absence
  * during a partial scan proves nothing — evicting on pagination noise would
- * quietly pull working games out of the claim.
- *
- * Games currently playing survive into the new queue even when the scan lost
- * them (auto mode, partial scan): dropping a live game because one page
- * timed out is the exact bug the user would experience as "the farm stopped
- * for no reason".
+ * quietly pull working games out of the claim. Games currently playing survive
+ * a scan that lost them for the same reason.
  */
 export function farmTick(input: FarmTickInput): FarmTickResult {
   const max = input.max ?? FARM_MAX;
@@ -82,26 +88,22 @@ export function farmTick(input: FarmTickInput): FarmTickResult {
   });
   const finished = new Set(finishedNow);
 
-  const carry = input.prevPlaying.filter((a) => !finished.has(a));
-  const merged = [...carry, ...input.queued, ...(input.auto ? truth.order.filter((a) => truth.owed.has(a)) : [])];
-
-  const queue: number[] = [];
-  const inQueue = new Set<number>();
-  for (const a of merged) {
-    if (inQueue.has(a) || input.dropped.has(a) || finished.has(a)) continue;
-    inQueue.add(a);
-    queue.push(a);
+  // The bench keeps its seats: a game already claimed stays claimed, so a
+  // routine rescan never reshuffles the whole set for nothing.
+  const bench: number[] = [];
+  const taken = new Set<number>();
+  for (const appid of input.prevPlaying) {
+    if (finished.has(appid) || taken.has(appid)) continue;
+    taken.add(appid);
+    bench.push(appid);
+  }
+  for (const appid of truth.order) {
+    if (!truth.owed.has(appid) || taken.has(appid)) continue;
+    taken.add(appid);
+    bench.push(appid);
   }
 
-  const playing = input.prevPlaying.filter((a) => inQueue.has(a));
-  for (const a of queue) {
-    if (playing.length >= max) break;
-    if (!playing.includes(a)) playing.push(a);
-  }
-
-  // The returned queue means "still waiting for a slot" — games the bench
-  // just took are no longer waiting, and re-listing them would make the UI
-  // double-count every promotion.
-  const waiting = queue.filter((a) => !playing.includes(a));
-  return { playing, finishedNow, queue: waiting, done: playing.length === 0 };
+  const playing = bench.slice(0, max);
+  const waiting = bench.slice(max);
+  return { playing, finishedNow, waiting, done: playing.length === 0 };
 }

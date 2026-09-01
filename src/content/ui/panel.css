@@ -116,6 +116,7 @@
 .stw-status {
   padding: 8px 12px 6px;
   font-size: 12px;
+  line-height: 1.45;
   color: #8f98a0;
 }
 
@@ -186,8 +187,18 @@
 
 .stw-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  margin-top: 10px;
   padding: 10px 12px;
+  border-top: 1px solid #2a475e;
+}
+
+/* The follow-up row is part of the same block; one rule between them is enough. */
+.stw-actions + .stw-actions {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 
 .stw-btn {
@@ -199,10 +210,15 @@
   font-weight: 600;
   background: #2a475e;
   color: #c7d5e0;
+  transition: background 0.12s ease, opacity 0.12s ease;
+}
+
+.stw-btn:hover:not(:disabled) {
+  background: #3d6c8d;
 }
 
 .stw-btn:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: default;
 }
 
@@ -241,9 +257,11 @@
 }
 
 .stw-empty {
-  padding: 16px 8px;
+  padding: 22px 12px;
   text-align: center;
-  color: #8f98a0;
+  color: #6a7a86;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .stw-row {
@@ -256,6 +274,10 @@
   background: #16202d;
   border-left: 3px solid #2a475e;
   border-radius: 3px;
+}
+
+.stw-row:hover {
+  border-left-color: #3d6c8d;
 }
 
 .stw-row[data-kind="reprice"] {
@@ -323,8 +345,43 @@
 
 .stw-controls {
   display: flex;
-  gap: 6px;
+  flex-wrap: wrap;
+  /* Buttons sit on the controls' own baseline, under the labels, not beside
+     them — otherwise a labelled select shoves every plain button downward. */
+  align-items: flex-end;
+  gap: 8px;
   padding: 10px 12px 0;
+}
+
+/**
+ * A named control. Four rows of anonymous dropdowns is what these tabs used to
+ * open with, and the only explanation was a `title` nobody hovers.
+ */
+.stw-field {
+  display: flex;
+  flex: 1 1 120px;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.stw-field-narrow {
+  flex: 0 0 auto;
+}
+
+.stw-field-l {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6a7a86;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stw-field .stw-select,
+.stw-field .stw-input {
+  width: 100%;
 }
 
 .stw-select,
@@ -658,46 +715,152 @@
 }
 
 
-/* Farm factory page (on /chat): live list of what is farmed and waiting. */
-.stw-farm-legend {
-  display: flex;
-  gap: 12px;
-  font-size: 12px;
-  opacity: 0.85;
+/**
+ * Card factory (on /chat). Read top to bottom: how much is owed, the buttons,
+ * how far the badge walk got, whether the chat is really carrying the claim,
+ * which games are on the bench, what dropped. The queue, the tick-boxes and
+ * the auto switch are gone, so there is nothing here that is not a fact.
+ */
+
+/**
+ * The badge walk is paced to a few pages a minute. Without a bar moving, a
+ * minute of honest waiting looks exactly like a hang — and got reported as one.
+ */
+.stw-prog {
+  padding: 8px 12px 0;
 }
+.stw-prog[hidden] {
+  display: none;
+}
+.stw-prog-text {
+  font-size: 11px;
+  color: #8f98a0;
+  margin-bottom: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.stw-prog-track {
+  height: 4px;
+  border-radius: 2px;
+  background: #16202d;
+  overflow: hidden;
+}
+.stw-prog-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #1a9fff, #66c0f4);
+  transition: width 0.4s ease;
+}
+
+/** The bench count is the number that says the factory is actually working. */
+.stw-stat[data-tone="go"] .stw-stat-n {
+  color: #46c06a;
+}
+
+.stw-farm-rows {
+  max-height: 300px;
+  padding-top: 4px;
+}
+
 .stw-farm-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 2px 0;
+  padding: 4px 6px 4px 9px;
   font-size: 13px;
+  border-left: 3px solid transparent;
+  border-radius: 0 3px 3px 0;
+}
+.stw-farm-row:hover {
+  background: #16202d;
 }
 .stw-farm-idx {
-  width: 26px;
-  color: rgba(255, 255, 255, 0.55);
+  width: 22px;
+  color: #6a7a86;
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .stw-farm-name {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/** Cards collected out of the set — context for how much the drops are worth. */
+.stw-farm-cards {
+  color: #6a7a86;
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .stw-farm-drops {
-  color: rgba(255, 255, 255, 0.7);
+  min-width: 52px;
+  text-align: right;
+  color: #8f98a0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/** On the bench right now: Steam is being told we play this one. */
+.stw-farm-row-play {
+  border-left-color: #46c06a;
+  background: #16202d;
+}
+.stw-farm-row-play .stw-farm-name {
+  color: #ffffff;
+}
+.stw-farm-row-play .stw-farm-drops {
+  color: #c7d5e0;
+}
+.stw-farm-tag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: rgba(70, 192, 106, 0.16);
+  color: #46c06a;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
   white-space: nowrap;
 }
-.stw-farm-row-play {
-  border-left: 3px solid #46c06a;
-  padding-left: 6px;
-  margin-left: -9px;
+
+/**
+ * What the socket says, not what the panel hopes. This line is the difference
+ * between "the farm is running" and "Steam has been told nothing".
+ */
+.stw-farm-wire {
+  margin: 8px 12px 0;
+  padding: 5px 8px;
+  border-radius: 3px;
+  border-left: 3px solid #2a475e;
+  background: #16202d;
+  font-size: 11px;
+  color: #8f98a0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.stw-farm-row-done {
-  opacity: 0.5;
-  text-decoration: line-through;
+.stw-farm-wire[data-kind="ok"] {
+  border-left-color: #46c06a;
 }
-.stw-farm-done {
-  font-size: 12px;
-  opacity: 0.8;
-  margin-top: 6px;
+.stw-farm-wire[data-kind="warn"] {
+  border-left-color: #d9a441;
+  color: #d9a441;
+}
+
+.stw-farm-log {
+  padding: 6px 12px 10px;
+  margin-top: 2px;
+  border-top: 1px solid #2a475e;
+  font-size: 11px;
+  color: #6a7a86;
+}
+.stw-farm-log:empty {
+  display: none;
+}
+.stw-farm-logline {
+  padding: 1px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

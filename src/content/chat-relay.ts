@@ -17,6 +17,18 @@ import { cmPlayBridgeName } from "../page/cm-play-core";
 /** Same name the MAIN bridge exports — one constant, no drift possible. */
 const BRIDGE = cmPlayBridgeName;
 
+/** Whatever the bridge answered. `ok`/`note` are always there; the rest is
+ * per-message (`cm-play/state` adds the live claim and its diagnostics). */
+export interface BridgeReply {
+  ok?: boolean;
+  note?: string;
+  /** cm-play/state: appids Steam is being told we play, right now. */
+  appids?: number[];
+  socket?: boolean;
+  ids?: boolean;
+  keepAlive?: boolean;
+}
+
 interface RelayPayload {
   stop: boolean;
   /** Ask Steam (via our own profile page) whether it sees us In-Game. */
@@ -35,19 +47,26 @@ const relayVersion = () => chrome.runtime.getManifest().version as string;
 
 /** Ask the MAIN bridge and wait for its -reply. Exported for the in-page
  * card farm — same page, same socket, no need to route through the worker. */
-export function bridgeCall(type: string, extra: Record<string, unknown>): Promise<{ ok?: boolean; note?: string }> {
+export function bridgeCall(type: string, extra: Record<string, unknown>): Promise<BridgeReply> {
   return new Promise((resolve) => {
     let settled = false;
+    let bell: ReturnType<typeof setTimeout> | undefined;
     const onMsg = (event: MessageEvent) => {
-      const d = event.data as { source?: string; type?: string; ok?: boolean; note?: string } | null;
+      const d = event.data as (BridgeReply & { source?: string; type?: string }) | null;
       if (event.source !== window || d?.source !== BRIDGE + "-reply" || d.type !== type) return;
       settled = true;
+      // An answered call must not leave its five-second alarm armed: the farm
+      // makes one of these per tick, per swap, per resume.
+      clearTimeout(bell);
       window.removeEventListener("message", onMsg);
-      resolve({ ok: !!d.ok, note: d.note });
+      // The whole reply travels, not just ok/note: `cm-play/state` answers with
+      // the appids actually on the wire, and that is the only honest thing to
+      // compare a rotation against.
+      resolve({ ...d, ok: !!d.ok });
     };
     window.addEventListener("message", onMsg);
     window.postMessage({ source: BRIDGE, type, ...extra }, "*");
-    setTimeout(() => {
+    bell = setTimeout(() => {
       if (settled) return;
       window.removeEventListener("message", onMsg);
       resolve({ ok: false, note: "чат не ответил (обнови страницу чата)" });

@@ -150,10 +150,20 @@ export function itemPage(): PlainItemPage | null {
   return ctx.itemPage;
 }
 
-/** The market minimum for one item of the open group, in cents. */
+/**
+ * The market minimum for one item of the open group, in cents.
+ *
+ * Two sources, because the first one is not always filled. Measured on
+ * 2026-09-01: a busy commodity (Fracture Case) ships `min_price: 6021` in its
+ * bucket, while a thin trading card ships `min_price: null` on a page whose own
+ * order book says the cheapest lot is 81,27 ₽. Both numbers are Steam's, both
+ * are already in the document, and taking the null as "no minimum" made the
+ * panel spend a request — or give no verdict — for an answer it was holding.
+ */
 export function bucketMinimum(hash: string): Cents | null {
   const bucket = ctx.itemPage?.buckets.find((b) => b.hash === hash);
-  return bucket?.min ?? null;
+  if (bucket?.min != null) return bucket.min;
+  return orderBook(hash)?.minSell ?? null;
 }
 
 /**

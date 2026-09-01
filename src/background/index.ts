@@ -104,20 +104,22 @@ const handlers: Handlers = {
     await chrome.storage.local.set({ [key]: list });
     return { ok: true };
   },
-  "farm/open": async (req) => {
-    // Bring a chat tab up on the farm hash; an empty appids list means "just
-    // open it" (the badges page is only an entry now), a non-empty one seeds
-    // the queue for the farm page to pick up from storage.
-    const prev = await chrome.storage.local.get("stwFarm");
-    const farm = (prev.stwFarm || {}) as Record<string, unknown>;
-    const next = { ...farm, updatedAt: Date.now() } as Record<string, unknown>;
-    if (req.appids.length) next.queue = req.appids.slice(0, 500);
-    await chrome.storage.local.set({ stwFarm: next });
+  "farm/open": async () => {
+    // Bring a chat tab up on the farm hash. Nothing is seeded any more: the
+    // factory farms every game the badge scan says still owes cards, so there
+    // is no queue to plant here.
     const tabs = await chrome.tabs.query({ url: CHAT_TAB_PATTERNS });
-    const farmUrl = "https://steamcommunity.com/chat/#stw-farm";
     const first = tabs.find((t) => t.id !== undefined);
-    if (first) await chrome.tabs.update(first.id!, { url: farmUrl, active: true });
-    else await chrome.tabs.create({ url: farmUrl });
+    if (first) {
+      // Keep the tab's own path and change only the hash: navigating an open
+      // /chat to /chat/ is a full reload, which drops the CM socket and with
+      // it the claim the factory was holding. A hash change just opens the
+      // section (the farm listens for hashchange).
+      const base = (first.url ?? "").split("#")[0] || "https://steamcommunity.com/chat/";
+      await chrome.tabs.update(first.id!, { url: `${base}#stw-farm`, active: true });
+    } else {
+      await chrome.tabs.create({ url: "https://steamcommunity.com/chat/#stw-farm" });
+    }
     return { ok: true };
   },
   "cm/golden": async () => {
@@ -129,8 +131,16 @@ const handlers: Handlers = {
   },
 };
 
-/** Where the CM socket lives: the chat client itself. */
-const CHAT_TAB_PATTERNS = ["https://steamcommunity.com/chat/*", "https://steamcommunity.com/family/*"];
+/**
+ * Where the CM socket lives: the chat client itself.
+ *
+ * The patterns end in `/chat*`, not `/chat/*`: Steam's own links land on
+ * `steamcommunity.com/chat` with no trailing slash, and a `/chat/*` query
+ * misses that tab entirely — so «открыть фабрику» opened a SECOND chat tab
+ * beside the working one, and every duplicate is another ghost that can grab
+ * the farm lease.
+ */
+const CHAT_TAB_PATTERNS = ["https://steamcommunity.com/chat*", "https://steamcommunity.com/family*"];
 
 serve(handlers);
 

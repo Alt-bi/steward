@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
 
 import { postFromPage } from "./support/env";
-import { country, currencyId } from "../src/steam/page-context";
+import { bucketMinimum, country, currencyId, orderBook } from "../src/steam/page-context";
 import type { PlainItemPage } from "../src/page/ssr";
 
 /**
@@ -82,5 +82,41 @@ describe("the wallet on a page that carries no g_rgWalletInfo", () => {
 
   it("falls back to roubles only when nothing at all has said otherwise", () => {
     assert.equal(currencyId(), 3, "and never over something that did");
+  });
+});
+
+describe("the market minimum an item page already holds", () => {
+  it("uses the bucket price when Steam filled it in", () => {
+    // Fracture Case, measured 2026-09-01: a busy commodity carries min_price.
+    snapshot({
+      itemPage: itemPage({
+        buckets: [{ hash: "Fracture Case", min: 6021 }],
+        orders: [{ hash: "Fracture Case", maxBuy: 5965, minSell: 6021, buyOrders: 3787454, sellOrders: 184607 }],
+      }),
+    });
+    assert.equal(bucketMinimum("Fracture Case"), 6021);
+  });
+
+  it("falls back to the page's own order book when the bucket says null", () => {
+    // A thin trading card, same day: `min_price: null` on a page whose order
+    // book states the cheapest lot outright. Reading the null as «нет цены»
+    // threw away an answer that was already in the document — and cost either a
+    // request or the whole verdict.
+    snapshot({
+      itemPage: itemPage({
+        buckets: [{ hash: "489260-Rock Golem (Foil)", min: null }],
+        orders: [
+          { hash: "489260-Rock Golem (Foil)", maxBuy: 604, minSell: 8127, buyOrders: 12, sellOrders: 2 },
+        ],
+      }),
+    });
+    assert.equal(bucketMinimum("489260-Rock Golem (Foil)"), 8127);
+    assert.equal(orderBook("489260-Rock Golem (Foil)")?.maxBuy, 604);
+  });
+
+  it("still says nothing when neither source named a price", () => {
+    snapshot({ itemPage: itemPage({ buckets: [{ hash: "X", min: null }], orders: [] }) });
+    assert.equal(bucketMinimum("X"), null);
+    assert.equal(bucketMinimum("nothing here"), null);
   });
 });

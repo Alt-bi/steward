@@ -1,21 +1,25 @@
-import { el } from "../../ui/panel";
-import { send } from "../../../core/messaging";
+import { el, type StatusKind } from "../../ui/panel";
 import { bridgeCall } from "../../chat-relay";
 import { dropsDelta, farmableRows, scanBadges, type BadgeRow } from "../../../steam/badges";
-import { isPicked, noneDropped, pickAll, pickNone, togglePick, type Picks } from "../../../core/picks";
-import { FARM_MAX, farmTick, farmableOrder } from "./engine";
+import { FARM_MAX, claimChanged, farmTick } from "./engine";
 import { register, type FeatureContext } from "../registry";
+import { clearKept, isOrphaned, keptInterval } from "../../ui/orphan";
 
 /**
  * The card factory, living where the drop machine actually is: on /chat,
- * next to the CM socket it drives. The badges page only seeds the queue and
- * points here — one page to keep open, one ledger to watch, exactly like the
- * third-party factories the user came from, minus their cloud.
+ * next to the CM socket it drives. The badges page only points here — one page
+ * to keep open, one ledger to watch, exactly like the third-party factories
+ * the user came from, minus their cloud.
+ *
+ * One rule, no modes: everything Steam says still owes cards is farmed, bench
+ * first, 32 at a time. The queue, the checkbox list, the auto toggle and the
+ * forever-ban «×» are gone — each was a way to end up with a running factory
+ * that had silently excluded every game it could farm, which is exactly what
+ * happened to the user twice.
  *
  * The loop is scan → tick → swap. Steam's badge counters are the only drop
- * ledger that matters, so every decision (evict a finished game, promote the
- * next one) is made from a fresh scan, never from a remembered count. Swaps
- * ride cm-play/swap so the keep-alive never idles between drop-outs.
+ * ledger that matters, so every decision is made from a fresh scan, never from
+ * a remembered count. Swaps ride cm-play/swap so the keep-alive never idles.
  */
 
 const FARM_KEY = "stwFarm";
@@ -28,10 +32,16 @@ const LEADER_STALE_MS = 30 * 1000;
 const WATCHDOG_MS = 5 * 1000;
 const LOG_CAP = 40;
 
+/** The chat socket's own account of what it claims — never storage's guess. */
+interface ChatClaim {
+  /** False when the bridge did not answer at all; then nothing is known. */
+  known: boolean;
+  appids: number[];
+  note: string;
+  ok: boolean;
+}
+
 interface FarmState {
-  queue: number[];
-  dropped: number[];
-  auto: boolean;
   running: boolean;
   playing: number[];
   names: Record<string, string>;
@@ -41,14 +51,9 @@ interface FarmState {
   /** Why the last rotation tick failed — the status line must show it. */
   lastErr?: string;
   lastErrAt?: number;
-  /** Why a running farm plays nothing (e.g. the ban list ate every game). */
-  starve?: string;
 }
 
 const EMPTY: FarmState = {
-  queue: [],
-  dropped: [],
-  auto: true,
   running: false,
   playing: [],
   names: {},
@@ -61,7 +66,17 @@ const instanceId = typeof crypto !== "undefined" && "randomUUID" in crypto ? cry
 
 async function readFarm(): Promise<FarmState> {
   const got = await chrome.storage.local.get(FARM_KEY);
-  return { ...EMPTY, ...(got[FARM_KEY] as Partial<FarmState> | undefined) };
+  // Old builds also stored `queue`, `dropped` and `auto` here. Nothing reads
+  // them any more, so the user's forever-banned games come back on their own —
+  // which is the whole point of deleting the ban list.
+  const saved = got[FARM_KEY] as Partial<FarmState> | undefined;
+  return {
+    ...EMPTY,
+    ...saved,
+    playing: Array.isArray(saved?.playing) ? saved.playing : [],
+    log: Array.isArray(saved?.log) ? saved.log : [],
+    names: saved?.names ?? {},
+  };
 }
 
 async function writeFarm(patch: Partial<FarmState>): Promise<FarmState> {
@@ -74,6 +89,11 @@ function pushLog(state: FarmState, text: string): FarmState["log"] {
   return [{ at: Date.now(), text }, ...state.log].slice(0, LOG_CAP);
 }
 
+/** Most-owed first: the games that pay off soonest go on the bench first. */
+function byDropsDesc(a: BadgeRow, b: BadgeRow): number {
+  return (b.dropsRemaining ?? 0) - (a.dropsRemaining ?? 0);
+}
+
 register({
   id: "farm",
   title: "Фабрика",
@@ -83,73 +103,89 @@ register({
     const section = ctx.panel.addSection("farm", "Фабрика карточек");
     const setStatus = section.setStatus;
 
-    const btnStart = el("button", "stw-btn", "Старт");
-    const btnStop = el("button", "stw-btn", "Стоп");
-    const btnRescan = el("button", "stw-btn", "Сканировать");
-    btnRescan.title = "Пройти страницы бейджей: список игр, счётчики и ротация берутся только оттуда";
-    const btnClaim = el("button", "stw-btn", "Забрать себе");
+    const btnStart = el("button", "stw-btn stw-btn-go", "Старт");
+    btnStart.type = "button";
+    btnStart.title = "Фармить все игры, за которые Steam ещё должен карточки";
+    const btnStop = el("button", "stw-btn stw-btn-danger", "Стоп");
+    btnStop.type = "button";
+    btnStop.title = "Снять заявку. Закрытая вкладка чата делает то же самое — так устроен Steam.";
+    const btnRescan = el("button", "stw-btn stw-btn-thin", "Пересчитать");
+    btnRescan.type = "button";
+    btnRescan.title = "Пройти страницы бейджей заново: счётчики и состав фарма берутся только оттуда";
+    const btnClaim = el("button", "stw-btn stw-btn-thin", "Забрать себе");
+    btnClaim.type = "button";
     btnClaim.hidden = true;
-    const btnRestore = el("button", "stw-btn stw-btn-thin", "вернуть все");
-    btnRestore.type = "button";
-    btnRestore.hidden = true;
-    btnRestore.title = "Кнопка × в очереди убирает игру из фармы навсегда (она и её будущие дропы игнорируются). Здесь снятые возвращаются — дропы снова фармятся.";
-    const autoBox = el("label", "stw-check");
-    const autoInput = el("input");
-    autoInput.type = "checkbox";
-    autoBox.append(autoInput, document.createTextNode(" фармить все игры с дропами (не только очередь)"));
-    const allBtn = el("button", "stw-btn stw-btn-thin", "все");
-    allBtn.type = "button";
-    const noneBtn = el("button", "stw-btn stw-btn-thin", "снять");
-    noneBtn.type = "button";
-    const btnQueue = el("button", "stw-btn", "Отмеченные → в фабрику");
-    btnQueue.type = "button";
-    btnQueue.title = "Заменить очередь отметками из списка ниже — «Старт» не обязателен, если фабрика уже идёт";
+
     const controls = el("div", "stw-controls");
-    controls.append(allBtn, noneBtn, btnQueue, btnRestore);
+    controls.append(btnStart, btnStop, btnRescan, btnClaim);
+
     const stats = el("div", "stw-stats");
     const statsNodes: Record<string, HTMLElement> = {};
+    const statBoxes: Record<string, HTMLElement> = {};
     for (const [key, label] of [
-      ["games", "игр с дропами", ""],
-      ["drops", "дропадось", ""],
-      ["badges", "бейджей прочитано", ""],
+      ["playing", "в игре"],
+      ["games", "ждут очереди"],
+      ["drops", "дропов осталось"],
     ] as const) {
       const box = el("div", "stw-stat");
       const n = el("div", "stw-stat-n", "—");
       box.append(n, el("div", "stw-stat-l", label));
       statsNodes[key] = n;
+      statBoxes[key] = box;
       stats.appendChild(box);
     }
-    const rowsWrap = el("div", "stw-rows");
-    /** The last scan — the checkbox list and «в фабрику» live on it. */
-    let scanRows: BadgeRow[] = [];
-    const picked: Picks = noneDropped();
 
-    const info = el("div", "stw-farm-info");
-    const listWrap = el("div", "stw-farm-list");
+    /**
+     * The scan bar. A badge walk is paced to a few pages a minute, so without
+     * it the panel sits mute for a minute or two after «Старт» — the user read
+     * that as a freeze, and they were right to: nothing on screen moved.
+     */
+    const prog = el("div", "stw-prog");
+    const progText = el("div", "stw-prog-text", "");
+    const progTrack = el("div", "stw-prog-track");
+    const progFill = el("div", "stw-prog-fill");
+    progTrack.appendChild(progFill);
+    prog.append(progText, progTrack);
+    prog.hidden = true;
+
+    const wire = el("div", "stw-farm-wire");
+    const rowsWrap = el("div", "stw-rows stw-farm-rows");
     const logWrap = el("div", "stw-farm-log");
 
     section.body.append(
-      el("p", "stw-hint", `Фабрика держит в чате до ${FARM_MAX} игр: выбил все дропы — игра снята, из очереди поставлена следующая. Ориентир — счётчики «осталось дропов» на /my/badges, они пересканируются сами.`),
+      el(
+        "p",
+        "stw-hint",
+        `Фармятся все игры, за которые Steam ещё должен карточки — до ${FARM_MAX} штук разом, выбитые сменяются следующими. Вкладку чата держи открытой: заявка живёт в ней.`
+      ),
       stats,
       controls,
+      prog,
+      wire,
       rowsWrap,
-      info,
-      listWrap,
-      autoBox,
-      btnStart,
-      btnStop,
-      btnRescan,
-      btnClaim,
       logWrap
     );
 
     let busy = false;
     let timer: number | null = null;
     let lastCounts = new Map<number, number | null>();
+    /** The last scan — the list below is drawn from it. */
+    let scanRows: BadgeRow[] = [];
+    /**
+     * Has a scan finished in this tab yet? Until it has, an empty bench is a
+     * factory warming up, not a broken one — telling those two apart is the
+     * difference between «запускаюсь» and a red alarm the user cannot act on.
+     */
+    let scanned = false;
+    /** Live badge-walk position, or null when no walk is in flight. */
+    let scanning: { page: number; rows: number; total: number | null } | null = null;
+    /** Last answer from the chat socket — rendered, so "not working" is visible. */
+    let chat: ChatClaim = { known: false, appids: [], note: "ещё не спрашивали", ok: false };
+    /** Owed but no free slot; a count only, since the bench holds 32. */
+    let waiting = 0;
 
-    // The page seeded by «Фабрика» on /badges arrives as #stw-farm — pull the
-    // section forward so the first thing the user sees is the machine, and on
-    // any later hash-navigation into this tab as well.
+    // The page seeded by «Открыть фабрику» on /badges arrives as #stw-farm —
+    // pull the section forward, now and on any later hash-navigation.
     if (location.hash === "#stw-farm") section.show();
     window.addEventListener("hashchange", () => {
       if (location.hash === "#stw-farm") section.show();
@@ -159,85 +195,112 @@ register({
       return new Date(ms).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
     }
 
+    /** The status line for whatever the factory is doing right now. */
+    function statusFor(state: FarmState, leaderBlocked: boolean): [string, StatusKind] {
+      if (leaderBlocked) {
+        return [
+          "Фабрику ведёт другая вкладка чата. Это пройдёт само: живая вкладка заявляет о себе каждые 10 секунд, мёртвая освобождает фабрику за ~30. Хочешь сейчас — «Забрать себе».",
+          "warn",
+        ];
+      }
+      if (state.running) {
+        if (state.playing.length) {
+          return [
+            `Фабрика идёт: в игре ${state.playing.length}` +
+              (waiting ? `, ждут очереди ${waiting}` : "") +
+              ` · пересчёт каждые ${Math.round(SCAN_MS / 60000)} мин`,
+            "work",
+          ];
+        }
+        // Nothing on the wire yet. Before the first scan lands that is simply
+        // the warm-up — Steam's badge pages are rate-paced and take up to a
+        // couple of minutes. Only claim something is wrong once we have looked.
+        if (!scanned) return ["Запускаюсь: читаю бейджи и ставлю первые игры…", "work"];
+        if (state.lastErr) return [`Крутится, но чат не поставил ни одной игры: ${state.lastErr}`, "err"];
+        return ["Крутится, но чат не поставил ни одной игры", "err"];
+      }
+      if (state.playing.length) return [`Пауза: ${state.playing.length} игр заявлено, ротация стоит`, ""];
+      if (scanRows.length) return [`Готово к старту: ${scanRows.length} игр ещё должны карточек`, ""];
+      return ["Жми «Старт» — фабрика сама посчитает бейджи и займётся всем, где остались дропы", ""];
+    }
+
     function render(state: FarmState, leaderBlocked: boolean): void {
       btnStart.disabled = busy || leaderBlocked || state.running;
       // Stop works from any tab — a ghost lease must never lock the off switch.
       btnStop.disabled = !state.running;
       btnRescan.disabled = busy || leaderBlocked;
-      autoInput.checked = state.auto;
       btnClaim.hidden = !leaderBlocked;
-      btnRestore.hidden = state.dropped.length === 0;
-      btnRestore.textContent = `вернуть все (${state.dropped.length})`;
-      setStatus(
-        leaderBlocked
-          ? "Фабрика ведёт другая вкладка чата. Это пройдёт само: живая вкладка заявляет о себе каждые 10 секунд, мёртвая освобождает фабрику в течение ~30. Хочешь сейчас — «Забрать себе»."
-          : state.running
-            ? state.playing.length === 0
-              ? state.starve
-                ? `Крутится впустую: ${state.starve}`
-                : `Крутится, но чат не ставит ни одной игры${state.lastErr ? `: ${state.lastErr}` : ""} — журнал ниже`
-              : `Фабрика идёт: в игре ${state.playing.length}, в очереди ${state.queue.length} · скан каждые ${Math.round(SCAN_MS / 60000)} мин`
-            : state.playing.length
-              ? `Пауза: ${state.playing.length} игр заявлено, ротация стоит`
-              : state.queue.length || state.auto
-                ? "Фабрика готова — «Старт»"
-                : "Очередь пуста: «Сканировать» → отметь игры → «Отмеченные → в фабрику», или включи авто-режим",
-        leaderBlocked
-          ? "warn"
-          : state.running
-            ? state.playing.length
-              ? "work"
-              : state.lastErr || state.starve
-                ? "err"
-                : "work"
-            : ""
-      );
 
-      info.textContent = "";
-      const playing = el("div");
-      playing.textContent = `Сейчас играем (${state.playing.length}): `;
-      playing.append(
-        ...state.playing.slice(0, 12).map((a) => {
-          const chip = el("span", "stw-chip", state.names[String(a)] || String(a));
-          return chip;
-        }),
-        state.playing.length > 12 ? el("span", "stw-muted", ` +${state.playing.length - 12}`) : el("span", "stw-muted", "")
-      );
-      info.append(playing);
+      const [text, kind] = statusFor(state, leaderBlocked);
+      setStatus(text, kind);
 
-      listWrap.textContent = "";
-      for (const a of state.queue.slice(0, 15)) {
-        const row = el("div", "stw-farm-row");
-        row.append(el("span", "", `${state.names[String(a)] || a}`));
-        const drop = el("button", "stw-mini", "×");
-        drop.type = "button";
-        drop.title = "Убрать из фармы (список «×») — вернуть через «вернуть все»";
-        drop.addEventListener("click", () => void removeGame(a));
-        row.append(drop);
-        listWrap.append(row);
-      }
-      if (state.queue.length > 15) listWrap.append(el("div", "stw-muted", `+${state.queue.length - 15} в очереди`));
+      statsNodes.playing!.textContent = String(state.playing.length);
+      statBoxes.playing!.dataset.tone = state.playing.length ? "go" : "";
+      statsNodes.games!.textContent = String(waiting);
+      statsNodes.drops!.textContent = scanned
+        ? String(scanRows.reduce((n, r) => n + (r.dropsRemaining ?? 0), 0))
+        : "—";
+
+      // The wire, spelled out. Every «не работает» report so far was the page
+      // believing storage while the socket carried nothing.
+      wire.textContent = `Чат: ${chat.note}`;
+      wire.dataset.kind = chat.known && chat.ok ? "ok" : "warn";
 
       logWrap.textContent = "";
-      for (const entry of state.log.slice(0, 8)) {
+      for (const entry of state.log.slice(0, 6)) {
         logWrap.append(el("div", "stw-farm-logline", `${fmtTime(entry.at)} — ${entry.text}`));
       }
     }
 
-    function renderRows(): void {
+    /**
+     * Repaint the parts a scan moves, and nothing else.
+     *
+     * Deliberately never touches `disabled`: this runs while `busy` is set, and
+     * a full `render()` from inside a tick is what left «Старт» frozen after
+     * every scan in 2.32.0.
+     */
+    function paintScan(): void {
+      prog.hidden = scanning === null;
+      if (!scanning) return;
+      const { page, rows, total } = scanning;
+      // Steam only names the total after page 1; until then the page number is
+      // the only honest progress there is, so the bar creeps instead of lying.
+      const pct = total && total > 0 ? Math.min(100, Math.round((rows / total) * 100)) : Math.min(90, page * 15);
+      progFill.style.width = `${pct}%`;
+      progText.textContent = total
+        ? `Бейджи: ${rows} из ${total} · страница ${page}`
+        : `Бейджи: страница ${page}…`;
+      setStatus(
+        total ? `Считаю бейджи: ${rows} из ${total}` : "Считаю бейджи: страница 1…",
+        "work"
+      );
+    }
+
+    /** The one list: every game that still owes cards, the claimed ones first. */
+    function renderRows(playing: readonly number[]): void {
+      const onBench = new Set(playing);
+      const order = [
+        ...playing.map((appid) => scanRows.find((r) => r.appid === appid)).filter((r): r is BadgeRow => !!r),
+        ...scanRows.filter((r) => !onBench.has(r.appid)),
+      ];
       rowsWrap.textContent = "";
-      for (const row of scanRows) {
-        const id = String(row.appid);
-        const line = el("div", "stw-row");
-        const name = el("label", "stw-name");
-        const check = document.createElement("input");
-        check.type = "checkbox";
-        check.className = "stw-check";
-        check.checked = isPicked(id, picked);
-        check.addEventListener("change", () => togglePick(id, picked));
-        name.append(check, document.createTextNode(` ${row.name}`));
-        name.title = `appid ${row.appid}`;
-        line.append(name, el("span", "stw-our", `${row.dropsRemaining ?? 0} др.`));
+      if (!order.length) {
+        rowsWrap.append(
+          el("div", "stw-empty", scanned ? "Дропов не осталось нигде" : "Список появится после пересчёта")
+        );
+        return;
+      }
+      for (const [i, row] of order.entries()) {
+        const line = el("div", "stw-farm-row");
+        const playingNow = onBench.has(row.appid);
+        if (playingNow) line.classList.add("stw-farm-row-play");
+        line.append(el("span", "stw-farm-idx", String(i + 1)), el("span", "stw-farm-name", row.name));
+        if (row.cardsTotal) {
+          line.append(el("span", "stw-farm-cards", `${row.cardsCollected ?? 0}/${row.cardsTotal}`));
+        }
+        line.append(el("span", "stw-farm-drops", `${row.dropsRemaining ?? 0} др.`));
+        if (playingNow) line.append(el("span", "stw-farm-tag", "в игре"));
+        line.title = `appid ${row.appid}`;
         rowsWrap.appendChild(line);
       }
     }
@@ -246,148 +309,224 @@ register({
       return state.leader !== instanceId && Date.now() - state.leaderAt < LEADER_STALE_MS;
     }
 
-    async function removeGame(appid: number): Promise<void> {
-      const state = await readFarm();
-      state.queue = state.queue.filter((a) => a !== appid);
-      if (!state.dropped.includes(appid)) state.dropped.push(appid);
-      const name = state.names[String(appid)] || String(appid);
-      await writeFarm({
-        queue: state.queue,
-        dropped: state.dropped,
-        log: pushLog(state, `снята из фармы: ${name} — «вернуть все» вернёт её, если дропы ещё есть`),
-      });
-      render(await readFarm(), await leaderBlocked(state));
-    }
-
     async function swapIn(playing: number[]): Promise<void> {
-      const r = await bridgeCall("cm-play/swap", { entries: playing.map((appid) => ({ appid, playing: true, secure: false, offline: false })) });
+      const r = await bridgeCall("cm-play/swap", {
+        entries: playing.map((appid) => ({ appid, playing: true, secure: false, offline: false })),
+      });
       if (!r.ok) throw new Error(r.note || "чат не принял ротацию");
+      chat = { known: true, appids: [...playing], note: `сокет жив, заявлено ${playing.length}`, ok: true };
     }
 
     async function stopClaim(): Promise<void> {
       await bridgeCall("cm-play/stop", { entries: [] });
+      chat = { known: true, appids: [], note: "заявка снята", ok: true };
+    }
+
+    /**
+     * What the chat socket is actually claiming, asked of the socket itself.
+     *
+     * Storage holds the factory's *intent*; only the bridge knows the *fact*,
+     * and the two part ways every time this page reloads — an F5, an Edge
+     * sleep, or the extension update that reloads every Steam tab by design.
+     * Comparing the new bench against the stored one found them equal and
+     * skipped the swap: nothing reached the socket while the status happily
+     * reported «идёт: в игре 8». Ask the wire.
+     */
+    async function liveClaim(): Promise<ChatClaim> {
+      const r = await bridgeCall("cm-play/state", {});
+      if (!r.ok || !Array.isArray(r.appids)) {
+        return { known: false, appids: [], note: r.note || "чат не ответил", ok: false };
+      }
+      return { known: true, appids: r.appids, note: r.note || "", ok: true };
+    }
+
+    /**
+     * Put the first games on the wire from page one alone.
+     *
+     * The full walk is gated to a few badge pages a minute — a minute or two on
+     * a normal library. Waiting for it meant «Старт» was followed by that long
+     * a stretch of a factory that was switched on and farming nothing, which is
+     * exactly what the user saw. One page costs one request and carries the
+     * most-owed games already, so the bench fills within seconds and the full
+     * scan below corrects it.
+     *
+     * It only runs when the bench is empty, so a working factory never pays for
+     * the extra page.
+     */
+    async function primeBench(): Promise<void> {
+      const state = await readFarm();
+      if (!state.running || state.playing.length) return;
+      const first = await scanBadges({
+        maxPages: 1,
+        onProgress: (p) => {
+          scanning = { page: p.page, rows: p.rows, total: p.total };
+          paintScan();
+        },
+      });
+      const rows = farmableRows(first).sort(byDropsDesc);
+      if (!rows.length) return;
+      const bench = rows.slice(0, FARM_MAX).map((r) => r.appid);
+      await swapIn(bench);
+      if (!scanRows.length) scanRows = rows;
+      await writeFarm({
+        playing: bench,
+        leader: instanceId,
+        leaderAt: Date.now(),
+        names: Object.fromEntries(rows.map((r) => [r.appid, r.name])),
+      });
+      renderRows(bench);
+      statsNodes.playing!.textContent = String(bench.length);
+      statBoxes.playing!.dataset.tone = "go";
+    }
+
+    /**
+     * The scan-and-rotate half of a tick. Returns the one status line that has
+     * to survive the redraw below (finished / failed), or null for the normal
+     * case where `render` already words it.
+     *
+     * It deliberately does NOT draw the controls: every early return here used
+     * to redraw the panel while `busy` was still set, and `render` disables
+     * «Старт» and «Пересчитать» while busy. `busy` cleared a moment later in
+     * `finally`, but nothing redrew — so a finished scan left both buttons dead
+     * until some unrelated event happened to repaint. That is the «кнопка старт
+     * недоступна» the user hit.
+     */
+    async function runTick(): Promise<[string, StatusKind] | null> {
+      // Best effort: a factory that cannot prime still gets the full scan
+      // below, and the bridge's own error surfaces there.
+      await primeBench().catch(() => undefined);
+
+      const scan = await scanBadges({
+        maxPages: 20,
+        onProgress: (p) => {
+          scanning = { page: p.page, rows: p.rows, total: p.total };
+          paintScan();
+        },
+      });
+      scanning = null;
+      prog.hidden = true;
+      // Zero rows AND an incomplete walk means the badge page did not read at
+      // all — moved markup, a login wall, a sorry-page that slipped the net
+      // checks. Say so and touch nothing: the running claim keeps its games
+      // through the keep-alive while we retry, instead of the scan's silence
+      // being read as «всё выбито».
+      if (!scan.rows.length && !scan.complete) {
+        throw new Error("страница бейджей не прочиталась — открой /my/badges и проверь, что она грузится");
+      }
+      scanRows = farmableRows(scan).sort(byDropsDesc);
+      scanned = true;
+
+      const byAppid = new Map<number, string>();
+      const counts = new Map<number, number | null>();
+      for (const r of scan.rows) {
+        if (r.foil) continue;
+        if (!byAppid.has(r.appid)) byAppid.set(r.appid, r.name);
+        if (r.dropsRemaining !== null) counts.set(r.appid, r.dropsRemaining);
+      }
+      const gained = dropsDelta(lastCounts.size ? lastCounts : new Map(counts), scan.rows);
+      lastCounts = counts;
+
+      const state = await readFarm();
+      if (!state.running) {
+        waiting = 0;
+        return null;
+      }
+
+      const next = farmTick({
+        rows: scan.rows,
+        scanComplete: scan.complete,
+        prevPlaying: state.playing,
+      });
+      waiting = next.waiting.length;
+
+      let log = state.log;
+      for (const [appid, n] of gained) {
+        log = [{ at: Date.now(), text: `+${n} карта: ${byAppid.get(appid) || appid}` }, ...log].slice(0, LOG_CAP);
+      }
+      for (const a of next.finishedNow) {
+        log = [{ at: Date.now(), text: `выбито всё: ${byAppid.get(a) || a} — ставим следующую` }, ...log].slice(0, LOG_CAP);
+      }
+
+      // The socket is the only thing that knows what Steam was told. A bench
+      // that matches storage but not the wire is the silent-death case.
+      chat = await liveClaim();
+      const claimed = chat.known ? chat.appids : null;
+      if (claimChanged(next.playing, claimed)) {
+        if (next.playing.length === 0) {
+          if (claimed === null || claimed.length) await stopClaim();
+        } else {
+          // Throws with the bridge's own note when the chat cannot carry it —
+          // the caller writes that into lastErr and the status line.
+          await swapIn(next.playing);
+        }
+      }
+
+      await writeFarm({
+        playing: next.playing,
+        leader: instanceId,
+        leaderAt: Date.now(),
+        lastErr: "",
+        lastErrAt: 0,
+        names: { ...state.names, ...Object.fromEntries(byAppid) },
+        log,
+      });
+
+      const anyOwed = scan.rows.some((r) => !r.foil && (r.dropsRemaining ?? 0) > 0);
+      if (next.done && scan.complete && !anyOwed) {
+        // Closing on this tick must mean Steam itself says nothing is owed.
+        // An empty bench from a failed or partial scan is not victory — the
+        // loop keeps retrying instead of lying.
+        await writeFarm({ running: false });
+        return ["Дропов нигде не осталось — фабрика закончила. Можно крафтить значки.", "ok"];
+      }
+      return null;
     }
 
     async function tick(manual = false): Promise<void> {
-      if (busy) return;
+      if (busy || isOrphaned()) return;
       const state0 = await readFarm();
       // A manual scan is always allowed — it is how the list gets built on a
       // stopped factory. The rotation half below only runs while it is on.
       if (!manual && (!state0.running || (await leaderBlocked(state0)))) return;
       busy = true;
+      let note: [string, StatusKind] | null = null;
       try {
-        const scan = await scanBadges({ maxPages: 20 });
-        scanRows = farmableRows(scan).sort((a, b) => (b.dropsRemaining ?? 0) - (a.dropsRemaining ?? 0));
-        statsNodes.games!.textContent = String(scanRows.length);
-        statsNodes.drops!.textContent = String(scanRows.reduce((n, r) => n + (r.dropsRemaining ?? 0), 0));
-        statsNodes.badges!.textContent = String(scan.rows.length);
-        renderRows();
-        const byAppid = new Map<number, string>();
-        const counts = new Map<number, number | null>();
-        for (const r of scan.rows) {
-          if (r.foil) continue;
-          if (!byAppid.has(r.appid)) byAppid.set(r.appid, r.name);
-          if (r.dropsRemaining !== null) counts.set(r.appid, r.dropsRemaining);
-        }
-        const gained = dropsDelta(lastCounts.size ? lastCounts : new Map(counts), scan.rows);
-        lastCounts = counts;
-
-        const state = await readFarm();
-        if (!state.running) {
-          setStatus(
-            scanRows.length
-              ? `Посчитано: ${scanRows.length} игр должны карточек. Отмечай и «Отмеченные → в фабрику» → «Старт».`
-              : "Дропов не осталось — можно крафтить.",
-            "ok"
-          );
-          busy = false;
-          return;
-        }
-        const next = farmTick({
-          rows: scan.rows,
-          scanComplete: scan.complete,
-          prevPlaying: state.playing,
-          queued: state.queue,
-          dropped: new Set(state.dropped),
-          auto: state.auto,
-        });
-
-        let log = state.log;
-        for (const [appid, n] of gained) {
-          const who = scan.rows.find((r) => r.appid === appid)?.name || String(appid);
-          log = [{ at: Date.now(), text: `+${n} карта: ${who}` }, ...log].slice(0, LOG_CAP);
-        }
-        for (const a of next.finishedNow) {
-          log = [{ at: Date.now(), text: `выбито всё: ${byAppid.get(a) || a} — снята, ставим следующую` }, ...log].slice(0, LOG_CAP);
-        }
-
-        const changed = next.playing.join(",") !== state.playing.join(",");
-
-        // A running farm with nothing to play is never a mystery: if the scan
-        // sees games that owe drops, they were removed by the forever-ban list
-        // — say so and show the way back.
-        let starve = "";
-        if (next.playing.length === 0) {
-          const owed = farmableOrder(scan.rows);
-          const banned = owed.filter((a) => state.dropped.includes(a));
-          if (owed.length && banned.length === owed.length) {
-            starve = `список «×» съел все ${owed.length} игр с дропами — «вернуть все»`;
-          }
-        }
-        if (changed && next.playing.length >= 0) {
-          if (next.playing.length === 0 && state.playing.length > 0) await stopClaim();
-          else await swapIn(next.playing);
-        }
-
-        await writeFarm({
-          playing: next.playing,
-          queue: next.queue,
-          leader: instanceId,
-          leaderAt: Date.now(),
-          lastErr: "",
-          lastErrAt: 0,
-          starve,
-          names: { ...state.names, ...Object.fromEntries(byAppid) },
-          log,
-        });
-        const anyOwed = scan.rows.some((r) => !r.foil && (r.dropsRemaining ?? 0) > 0);
-        if (next.done && state.playing.length === 0 && scan.complete && !anyOwed) {
-          // Closing on this tick must mean Steam itself says nothing is owed.
-          // An empty bench from a failed or partial scan is not victory — the
-          // loop keeps retrying instead of lying.
-          setStatus("Дропов нигде не осталось — фабрика закончила. Жми «Пересчитать» для проверки.", "ok");
-          await writeFarm({ running: false });
-        }
-        const fresh = await readFarm();
-        render(fresh, false);
-        renderRows();
+        note = await runTick();
       } catch (err) {
+        const why = String((err as Error).message || err);
         const state = await readFarm();
         await writeFarm({
-          lastErr: String((err as Error).message || err).slice(0, 160),
+          lastErr: why.slice(0, 160),
           lastErrAt: Date.now(),
-          log: pushLog({ ...state, log: [] }, `сбой цикла: ${(err as Error).message?.slice(0, 80) || err}`),
+          log: pushLog({ ...state, log: [] }, `сбой цикла: ${why.slice(0, 90)}`),
         });
-        setStatus(`Цикл ошибся: ${(err as Error).message?.slice(0, 90) || err} — см. журнал`, "err");
+        note = [`Цикл ошибся: ${why.slice(0, 110)}`, "err"];
       } finally {
         busy = false;
+        scanning = null;
+        prog.hidden = true;
       }
+      // One redraw, and only after `busy` is down — otherwise the tick freezes
+      // the very buttons it just finished using.
+      const fresh = await readFarm();
+      renderRows(fresh.playing);
+      render(fresh, await leaderBlocked(fresh));
+      if (note) setStatus(note[0], note[1]);
     }
 
     function armLoop(): void {
-      if (timer !== null) window.clearInterval(timer);
-      timer = window.setInterval(() => {
-        void tick();
+      clearKept(timer);
+      // keptInterval, not setInterval: an extension update severs chrome.* under
+      // a running tab, and a scan loop that keeps firing into a dead bridge just
+      // prints «Extension context invalidated» until the tab is closed.
+      timer = keptInterval(() => {
+        void tick().catch(() => undefined);
       }, SCAN_MS);
     }
 
     /** Take the lease (with a log line) and run — used by watchdog and «Забрать себе». */
     async function adoptAndRun(state: FarmState, why: string): Promise<void> {
-      await writeFarm({
-        leader: instanceId,
-        leaderAt: Date.now(),
-        log: pushLog(state, why),
-      });
+      await writeFarm({ leader: instanceId, leaderAt: Date.now(), log: pushLog(state, why) });
       armLoop();
       render(await readFarm(), false);
       void tick();
@@ -399,6 +538,7 @@ register({
      * update, Edge sleep — a live tab claims itself every 10 s).
      */
     async function adoptIfOurs(): Promise<boolean> {
+      if (isOrphaned()) return false;
       const state = await readFarm();
       if (!state.running) return false;
       if (state.leader === instanceId) {
@@ -415,12 +555,51 @@ register({
       return true;
     }
 
+    /**
+     * Put the bench back on the wire after this page was reloaded.
+     *
+     * A reload wipes the bridge's claim but not storage, and the rotation loop
+     * only wakes every 5 minutes — behind a 30 s lease wait and a 20-page badge
+     * scan. That gap is minutes of a factory that says «идёт» and farms
+     * nothing. This re-claims within seconds and retries while the chat client
+     * finishes logging in (its socket does not exist at document_idle yet).
+     */
+    async function resumeClaim(): Promise<void> {
+      for (let attempt = 0; attempt < 20; attempt++) {
+        if (isOrphaned()) return;
+        const state = await readFarm();
+        if (!state.running || state.playing.length === 0) return;
+        if (!(await leaderBlocked(state))) {
+          chat = await liveClaim();
+          if (chat.known && chat.ok) {
+            if (!claimChanged(state.playing, chat.appids)) {
+              render(state, false);
+              return; // already on the wire — a reload that landed on its feet
+            }
+            try {
+              await swapIn(state.playing);
+              await writeFarm({
+                log: pushLog(state, `заявка восстановлена после перезагрузки: ${state.playing.length} игр`),
+              });
+              render(await readFarm(), false);
+              return;
+            } catch {
+              /* the socket is not ready yet — the retry below is the cure */
+            }
+          }
+          render(state, false);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+      }
+    }
+
     btnStart.addEventListener("click", () => {
       void (async () => {
-        await writeFarm({ running: true, leader: instanceId, leaderAt: Date.now() });
+        const state = await writeFarm({ running: true, leader: instanceId, leaderAt: Date.now() });
+        render(state, false);
         armLoop();
         void tick();
-      })();
+      })().catch(() => undefined);
     });
 
     btnStop.addEventListener("click", () => {
@@ -428,82 +607,39 @@ register({
         const state = await readFarm();
         // A stop only clears the lease this tab actually holds; stopping from
         // a follower tab pauses the farm but leaves the leader to re-pick it
-        // up — that tab's UI shows "остановлено", the lease lives or dies with
-        // its owner.
+        // up — the lease lives or dies with its owner.
         const ours = state.leader === instanceId;
         await writeFarm(ours ? { running: false, playing: [], leader: "", leaderAt: 0 } : { running: false, playing: [] });
-        if (timer !== null) window.clearInterval(timer);
+        clearKept(timer);
         timer = null;
         try {
           await stopClaim();
         } catch {
           /* the tab may already be gone; the claim dies with the socket */
         }
-        render(await readFarm(), false);
-      })();
+        waiting = 0;
+        const fresh = await readFarm();
+        renderRows(fresh.playing);
+        render(fresh, false);
+      })().catch(() => undefined);
     });
 
     btnRescan.addEventListener("click", () => {
-      void tick(true);
-    });
-
-    allBtn.addEventListener("click", () => {
-      pickAll(scanRows.map((r) => String(r.appid)), picked);
-      renderRows();
-    });
-
-    noneBtn.addEventListener("click", () => {
-      pickNone(scanRows.map((r) => String(r.appid)), picked);
-      renderRows();
-    });
-
-    btnQueue.addEventListener("click", () => {
-      void (async () => {
-        const chosen = scanRows.filter((r) => isPicked(String(r.appid), picked)).map((r) => r.appid);
-        if (!chosen.length) {
-          setStatus("Отметь игры в списке (или жми «все»)", "warn");
-          return;
-        }
-        const state = await writeFarm({ queue: chosen });
-        setStatus(`Очередь: ${chosen.length} игр — ротируем по отметкам`, "ok");
-        render(state, await leaderBlocked(state));
-      })();
+      void tick(true).catch(() => undefined);
     });
 
     btnClaim.addEventListener("click", () => {
       void (async () => {
-        const state = await readFarm();
-        await adoptAndRun(state, "фабрика забрана этой вкладкой по кнопке");
-      })();
-    });
-
-    // «×» in the queue line was a forever-ban (the game and every future drop
-    // of it were ignored by the farm) with no way back. This is the way back:
-    // clear the ban list, re-scan, and the running farm picks those games up.
-    btnRestore.addEventListener("click", () => {
-      void (async () => {
-        const state = await readFarm();
-        const n = state.dropped.length;
-        if (!n) return;
-        await writeFarm({ dropped: [], log: pushLog(state, `возвращено в фабрику: ${n} снятых игр`) });
-        render(await readFarm(), await leaderBlocked(state));
-        void tick(true);
-      })();
-    });
-
-    autoInput.addEventListener("change", () => {
-      void (async () => {
-        const state = await writeFarm({ auto: autoInput.checked });
-        render(state, await leaderBlocked(state));
-      })();
+        await adoptAndRun(await readFarm(), "фабрика забрана этой вкладкой по кнопке");
+      })().catch(() => undefined);
     });
 
     // Leader heartbeat — a second farm tab must see this page is alive fast.
-    window.setInterval(() => {
+    keptInterval(() => {
       void (async () => {
         const state = await readFarm();
         if (state.running && state.leader === instanceId) await writeFarm({ leaderAt: Date.now() });
-      })();
+      })().catch(() => undefined);
     }, HEART_MS);
 
     // Self-healing: every WATCHDOG_MS the tab asks itself whether the farm
@@ -512,46 +648,45 @@ register({
     // and rotates on its own. The user should never have to press «Забрать
     // себе»: the button stays only as a manual override for a live second tab.
     // Background tabs adopt too — the farm is usually kept in a background
-    // tab, and a lease only a visible tab can heal is a lock again. Browser
-    // timer throttling just slows a background adoption to ~1 min, which the
-    // 30 s stale window tolerates.
-    window.setInterval(() => {
-      void adoptIfOurs();
+    // tab, and a lease only a visible tab can heal is a lock again.
+    keptInterval(() => {
+      void adoptIfOurs().catch(() => undefined);
     }, WATCHDOG_MS);
 
     // Coming back to a backgrounded farm tab re-checks the lease immediately.
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") void adoptIfOurs();
+      if (document.visibilityState === "visible") void adoptIfOurs().catch(() => undefined);
     });
 
-    // Re-render on storage writes (e.g. «Фабрика» seeded the queue from
-    // /badges while this tab sat open). A lease heartbeat is a storage write
-    // every 10 s — re-scanning 20 badge pages per heartbeat is a Steam
-    // rate-limit bomb, so rotation only re-runs when the lease changes hands
-    // or the queue is rewritten, not on every leaderAt bump.
-    let lastSeen: { leader: string; queue: string; running: string } = { leader: "", queue: "", running: "" };
+    // Re-render on storage writes (another chat tab took over, or stopped the
+    // farm). A lease heartbeat is a storage write every 10 s — re-scanning 20
+    // badge pages per heartbeat is a Steam rate-limit bomb, so rotation only
+    // re-runs when the lease changes hands or the farm is switched on or off.
+    let lastSeen = { leader: "", running: "" };
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local" || !(FARM_KEY in changes)) return;
       void (async () => {
         const state = await readFarm();
-        const mark = { leader: state.leader, queue: state.queue.join(","), running: String(state.running) };
-        const matters = mark.leader !== lastSeen.leader || mark.queue !== lastSeen.queue || mark.running !== lastSeen.running;
+        const mark = { leader: state.leader, running: String(state.running) };
+        const matters = mark.leader !== lastSeen.leader || mark.running !== lastSeen.running;
         lastSeen = mark;
-        render(state, await leaderBlocked(state));
+        // A scan in flight owns the status line; a heartbeat write must not
+        // stomp the progress the user is watching.
+        if (!busy) render(state, await leaderBlocked(state));
         if (!matters) return;
         if (state.running && state.leader === instanceId && timer === null) armLoop();
         if (state.running && state.leader === instanceId) void tick();
-      })();
+      })().catch(() => undefined);
     });
 
-    // A swap the factory does not own must not idle: if we still claim games
-    // but the page reloaded, the socket re-claims on the first tick.
+    // A claim the factory still holds must not idle: if the page reloaded, the
+    // socket re-claims here — not on some tick five minutes out.
     void (async () => {
       const state = await readFarm();
       lastCounts = new Map();
-      if (state.running && state.leader !== instanceId) return;
-      if (state.running && state.leader === instanceId) armLoop();
+      renderRows(state.playing);
       render(state, await leaderBlocked(state));
-    })();
+      await resumeClaim();
+    })().catch(() => undefined);
   },
 });

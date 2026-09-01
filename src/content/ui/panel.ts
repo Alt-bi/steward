@@ -28,6 +28,28 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+/**
+ * A control with its name written over it.
+ *
+ * The market and inventory tabs were rows of anonymous selects and number
+ * boxes whose only explanation was a `title` — and nobody hovers a dropdown to
+ * find out what it does. The label costs one line of markup and turns four
+ * stacked control rows into something readable top to bottom.
+ */
+export function field(label: string, control: HTMLElement, title?: string): HTMLElement {
+  const wrap = el("div", "stw-field");
+  if (title) wrap.title = title;
+  wrap.append(el("span", "stw-field-l", label), control);
+  return wrap;
+}
+
+/** The same, for a control that must stay its own narrow width (a number box). */
+export function narrowField(label: string, control: HTMLElement, title?: string): HTMLElement {
+  const wrap = field(label, control, title);
+  wrap.classList.add("stw-field-narrow");
+  return wrap;
+}
+
 export class Panel {
   readonly root: HTMLElement;
   private readonly tabsBar: HTMLElement;

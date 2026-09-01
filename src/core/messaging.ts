@@ -108,10 +108,11 @@ export interface Protocol {
   };
   /** What the capture ring holds right now — the tab reads it to offer replay. */
   "cm/golden": { req: Record<string, never>; res: { frames: { bytes: number[]; mine: boolean; at: number }[] } };
-  /** Seed the card-factory queue and bring up the farm view in a chat tab.
-   * The farm itself lives on /chat — it talks to the MAIN bridge directly. */
+  /** Bring up the farm view in a chat tab. Nothing is seeded: the factory
+   * farms everything the badge scan says is owed, so there is no queue to
+   * hand it. The farm itself lives on /chat and talks to the MAIN bridge. */
   "farm/open": {
-    req: { appids: number[] };
+    req: Record<string, never>;
     res: { ok: true } | { ok: false; error: string };
   };
 }

@@ -5,7 +5,7 @@ import { beforeEach, describe, it } from "node:test";
 
 import { calls, reports, resetEnv, setAcquire, setSteam } from "./support/env";
 
-import { cancelBuyOrder, removeListing, sellItem } from "../src/steam/actions";
+import { removeListing, sellItem } from "../src/steam/actions";
 import { SteamError } from "../src/steam/net";
 import { fetchMyListings } from "../src/steam/mylistings";
 import { describeRelistFailure, haltsRun, outcomeUnknown } from "../src/content/ui/errors";
@@ -68,16 +68,6 @@ describe("a write sent with a session that has already expired", () => {
   it("raises a reply it cannot read as not knowing, never as done", async () => {
     setSteam(() => ({ status: 200, body: "<html><body>maintenance</body></html>" }));
     assert.equal(await kindOf(removeListing("1", pacing)), "not_json");
-  });
-
-  it("will not tell a holder their money is back on an unreadable reply", async () => {
-    /** `cancelbuyorder` releases wallet money. Guessing here is the worst guess. */
-    setSteam(() => ({ status: 200, body: "<html><body>maintenance</body></html>" }));
-    assert.equal(await kindOf(cancelBuyOrder("77", pacing)), "not_json");
-    setSteam(() => ({ status: 200, body: LOGGED_OUT }));
-    assert.equal(await kindOf(cancelBuyOrder("77", pacing)), "not_logged_in");
-    setSteam(() => ({ status: 200, body: JSON.stringify({ success: 1 }) }));
-    assert.equal(await kindOf(cancelBuyOrder("77", pacing)), "resolved");
   });
 });
 

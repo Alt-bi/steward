@@ -9,6 +9,7 @@ import {
   gamesPlayedBody,
   inGameFromProfileHtml,
   protoBufHeader,
+  readFrameHeader,
   varintBytes,
 } from "../src/page/cm-play-core";
 
@@ -82,5 +83,38 @@ describe("cm-play-core", () => {
   it("negative sessionids widen to int64 like the chat's own frames", () => {
     assert.equal(hex(varintBytes(-1)), "ff ff ff ff ff ff ff ff ff 01");
     assert.equal(hex(varintBytes(0)), "00");
+  });
+});
+
+describe("readFrameHeader", () => {
+  it("reads back the ids we wrote — the sniffer's whole job", () => {
+    const frame = buildGamesPlayedFrame([{ appid: 730 }], {
+      steamid: "76561000000000000",
+      sessionid: -1470582744,
+    });
+    const head = readFrameHeader(frame);
+    assert.equal(head?.emsg, 742);
+    assert.equal(head?.steamid, "76561000000000000");
+    assert.equal(head?.sessionid, -1470582744);
+  });
+
+  it("reads the live chat header off any message, not just ours", () => {
+    // The captured ClientPersonaState header, framed as EMsg 703|proto: this
+    // is what the chat's own heartbeat looks like, and it names the account
+    // without us touching a single Steam JS field.
+    const header = LIVE_HEADER.split(" ").map((h) => parseInt(h, 16));
+    const word = (703 | 0x80000000) >>> 0;
+    const u32 = (n: number): number[] => [n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255];
+    const frame = new Uint8Array([...u32(word), ...u32(header.length), ...header, 0x08, 0x01]);
+    const head = readFrameHeader(frame);
+    assert.equal(head?.emsg, 703);
+    assert.equal(head?.steamid, "76561000000000000");
+    assert.equal(head?.sessionid, -1470582744);
+  });
+
+  it("refuses frames that are not protobuf-framed", () => {
+    // No high bit: a plain-struct message carries no CMsgProtoBufHeader.
+    assert.equal(readFrameHeader(new Uint8Array([0xd6, 0x02, 0, 0, 0, 0, 0, 0])), null);
+    assert.equal(readFrameHeader(new Uint8Array([1, 2])), null);
   });
 });

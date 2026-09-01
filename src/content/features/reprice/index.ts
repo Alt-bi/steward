@@ -10,13 +10,13 @@ import { needsConfirmation, removeListing, sellItem } from "../../../steam/actio
 import { scanCompetitors } from "../../../steam/listings";
 import { forgetGroup, knownGroup, learnGroups } from "../../../steam/grouping";
 import { learnGroupForItem } from "../../../steam/search";
-import { applyAssetRefs, fetchMyListings, listingsOnPage } from "../../../steam/mylistings";
+import { fetchMyListings } from "../../../steam/mylistings";
 import { allowSteamTraffic, sleep, SteamError, type WaitReason } from "../../../steam/net";
-import { currencyId, feeConfig, refreshPage, sessionId, waitForPage } from "../../../steam/page-context";
+import { currencyId, feeConfig, sessionId, waitForPage } from "../../../steam/page-context";
 import { loadHistories } from "../../../steam/history-load";
 import { fetchMarketLows, priceCacheKey } from "../../../steam/prices";
 import type { HistoryStats } from "../../../steam/pricehistory";
-import { el, type StatusKind } from "../../ui/panel";
+import { el, field, type StatusKind } from "../../ui/panel";
 import { describeError, describeRelistFailure, type WriteStage } from "../../ui/errors";
 import { register, type FeatureContext } from "../registry";
 import {
@@ -230,7 +230,10 @@ async function mount(ctx: FeatureContext): Promise<void> {
     option.textContent = label;
     sortSelect.appendChild(option);
   }
-  filterRow.append(queryInput, sortSelect);
+  filterRow.append(
+    field("Фильтр", queryInput, "Ищет и по названию, и по market_hash_name — там живёт износ"),
+    field("Сортировка", sortSelect)
+  );
 
   const levelRow = el("div", "stw-controls");
   const levelSelect = document.createElement("select");
@@ -255,7 +258,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     "Сохранить отфильтрованный список таблицей: что стоит, за сколько, почему и что делать. Открывается в Excel.";
   csvBtn.addEventListener("click", () => exportCsv());
 
-  levelRow.append(levelSelect, historyBtn, csvBtn);
+  levelRow.append(field("Цена", levelSelect, levelSelect.title), historyBtn, csvBtn);
 
   const movableLabel = el("label", "stw-toggle");
   movableLabel.title = "Оставить только те лоты, которые план собирается переставить";
@@ -277,7 +280,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   const shownLine = el("div", "stw-hint", "");
 
   const actions = el("div", "stw-actions");
-  const scanBtn = el("button", "stw-btn stw-btn-primary", "Сканировать страницу");
+  const scanBtn = el("button", "stw-btn stw-btn-primary", "Сканировать лоты");
   scanBtn.type = "button";
   const applyBtn = el("button", "stw-btn stw-btn-go", "Переставить");
   applyBtn.type = "button";
@@ -375,7 +378,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   function exportCsv(): void {
     const views = currentViews();
     if (!views.length) {
-      status("Экспортировать нечего — сначала «Сканировать страницу».", "warn");
+      status("Экспортировать нечего — сначала «Сканировать лоты».", "warn");
       return;
     }
     const rows = views.map((plan) => [
@@ -443,7 +446,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     rows.replaceChildren();
     if (!state.plans.length) {
       rows.appendChild(
-        el("div", "stw-empty", "Сверю лоты, которые Steam уже нарисовал на этой странице. Перелистни My listings и сканируй снова, чтобы взять следующие.")
+        el("div", "stw-empty", "Нажми «Сканировать лоты» — возьму все активные лоты аккаунта, не только те, что Steam нарисовал на странице.")
       );
       return;
     }
@@ -482,13 +485,13 @@ async function mount(ctx: FeatureContext): Promise<void> {
    * Steam answering with a page instead of the listing book, which no amount of
    * waiting fixes.
    */
-  type ExactStop = "blocked" | "aborted" | "gone" | null;
+  type ExactStop = "blocked" | "aborted" | "gone" | "lying" | null;
 
   async function resolveExactLows(
     unsettled: ItemGroup[]
   ): Promise<{ stop: ExactStop; requests: number; unnamed: number[] }> {
     /** Learned once already; asking again would only spend the budget to confirm. */
-    if (bookLiveness.dead) return { stop: "gone", requests: 0, unnamed: [] };
+    if (bookLiveness.dead()) return { stop: "gone", requests: 0, unnamed: [] };
 
     const ttlMs = state.settings.priceTtlMinutes * 60_000;
     /** The book hands us a fresher market minimum than priceoverview would have. */
@@ -497,6 +500,8 @@ async function mount(ctx: FeatureContext): Promise<void> {
     let done = 0;
     let requests = 0;
     let stop: ExactStop = null;
+    /** Books of zero about items we hold — Steam's soft refusal, counted. */
+    let emptyBooks = 0;
     /** Apps this run ran into the naming wall on, for the summary line. */
     const hitUnnamed = new Set<number>();
 
@@ -542,7 +547,14 @@ async function mount(ctx: FeatureContext): Promise<void> {
             state.ourIds,
             pacing,
             group.ourListingIds.size,
-            known ?? undefined
+            known ?? undefined,
+            /**
+             * Only here can an empty book honestly mean «wrong name»: this app
+             * hides its items behind group ids and we have not learned one yet.
+             * Everywhere else our own lot is in that book by definition, so a
+             * book of zero is Steam refusing and must not be filed as a fact.
+             */
+            { nameMayBeWrong: GROUP_ID_APPS.has(group.appid) && !known }
           );
           if (scan.unnamed) {
             /**
@@ -574,6 +586,21 @@ async function mount(ctx: FeatureContext): Promise<void> {
             return;
           }
           if (err instanceof SteamError && err.kind === "not_logged_in") throw err;
+          if (err instanceof SteamError && err.kind === "empty") {
+            /**
+             * Steam answered «nobody is selling» about an item we are ourselves
+             * selling. That is the first stage of its throttle, and the second
+             * is the market homepage as markup — so the same two-strike rule
+             * applies, and for the same reason: one is weather, two in a row is
+             * a pattern, and continuing at this pace is what earns the markup.
+             */
+            emptyBooks += 1;
+            if (emptyBooks >= 2) {
+              stop = "lying";
+              return;
+            }
+            continue;
+          }
           if (err instanceof SteamError && err.kind === "not_json") {
             /**
              * Markup where JSON belongs. One of these is weather — a proxy
@@ -586,7 +613,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
              * user whether to wait, log in again, or solve a captcha.
              */
             bookLiveness.sawMarkup(err.note);
-            if (bookLiveness.dead) {
+            if (bookLiveness.dead()) {
               stop = "gone";
               return;
             }
@@ -645,7 +672,19 @@ async function mount(ctx: FeatureContext): Promise<void> {
      * five search requests, zero items settled, and Steam cut the scan off before
      * the book pass ever ran. The request that always answers goes first.
      */
-    const cacheOnly = exact;
+    /**
+     * …unless the book is the thing that is refusing.
+     *
+     * Exact mode makes the price pass cache-only because the book answers
+     * better and cheaper. When the book is standing in its cooldown, that
+     * reasoning inverts: skipping the priced pass leaves a run that makes no
+     * requests at all, changes nothing, and reports «посчитано по рыночному
+     * минимуму: 0 из 10» having computed no minimum whatsoever. That is the
+     * «ничего не работает» the user hit — and the cure is the ordinary path
+     * every SIH-shaped tool uses, which was sitting right here switched off.
+     */
+    const bookRefusing = exact && bookLiveness.dead();
+    const cacheOnly = exact && !bookRefusing;
 
     const result = await fetchMarketLows(toFetch, {
       ...pacing,
@@ -653,7 +692,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
       source: state.settings.priceSource,
       ttlMs: state.settings.priceTtlMinutes * 60_000,
       cacheOnly,
-      fallbackToOverview: !exact,
+      fallbackToOverview: !exact || bookRefusing,
       onProgress: (done, total, label) => status(`Цены ${done}/${total} · ${label}`, "work"),
     });
 
@@ -679,6 +718,35 @@ async function mount(ctx: FeatureContext): Promise<void> {
         exactStop = book.stop;
         exactRequests = book.requests;
         unnamedAppIds = book.unnamed;
+
+        /**
+         * The book refused — but the market minimum is a different endpoint,
+         * and it was never asked, because exact mode had held the price pass
+         * to the cache. Ask it now for whatever is still unpriced, so the run
+         * ends with the answer it already claims in its own status line.
+         */
+        if (exactStop === "gone" || exactStop === "lying") {
+          const unpriced = unsettled.filter((g) => state.marketLows[g.key] == null);
+          if (unpriced.length) {
+            status(`Книга лотов отказывает — беру рыночный минимум по ${unpriced.length} предм.…`, "work");
+            const rescue = await fetchMarketLows(unpriced, {
+              ...pacing,
+              concurrency: state.settings.scanConcurrency,
+              source: state.settings.priceSource,
+              ttlMs: state.settings.priceTtlMinutes * 60_000,
+              fallbackToOverview: true,
+              onProgress: (done, total, label) => status(`Цены ${done}/${total} · ${label}`, "work"),
+            });
+            Object.assign(state.marketLows, rescue.lows);
+            state.unresolved = rescue.unresolved;
+            exactRequests += rescue.requests;
+            for (const group of state.groups.values()) {
+              const known = state.lows.get(group.key);
+              if (known && !needsExactCheck(known)) continue;
+              state.lows.set(group.key, competitorFromMarketLow(group, state.marketLows[group.key] ?? null));
+            }
+          }
+        }
       }
     }
 
@@ -721,10 +789,31 @@ async function mount(ctx: FeatureContext): Promise<void> {
        * robot check means a human has to click. Without it we are guessing.
        */
       const seen = bookLiveness.lastMarkup ? ` Пришлась страница: «${bookLiveness.lastMarkup}».` : "";
+      const left = Math.ceil(bookLiveness.waitMs() / 1000);
+      /**
+       * Two different situations wore one sentence before, and the mismatch was
+       * the report: «Steam дважды прислал…» over «Запросов 0». Either it just
+       * happened, or it happened a while ago and the verdict is still standing —
+       * and in the second case the only useful fact is how long is left of it.
+       */
+      const when = exactRequests
+        ? `Steam дважды прислал веб-страницу вместо данных книги лотов — точную проверку конкурентов на этом не делаю.${seen}`
+        : `Книга лотов отказывала пару минут назад, поэтому в этот раз я её не трогал` +
+          `${left > 0 ? ` — попробую снова через ${left} с` : ""}.${seen}`;
       status(
-        `Steam дважды прислал веб-страницу вместо данных книги лотов — точную проверку конкурентов на этом не делаю. ` +
+        `${when} Посчитано по рыночному минимуму: ${checked} из ${totalItems}` +
+          `${todo ? `, к переносу: ${todo}` : ""}. ${spent}`,
+        "warn"
+      );
+      return;
+    }
+    if (stopped === "lying") {
+      const pause = await cooldownNote();
+      status(
+        `Steam дважды ответил «лотов нет» про предметы, которые сам же и продаёт, — это троттлинг, ` +
+          `а не отсутствие конкурентов, поэтому точную проверку я остановил. ` +
           `Посчитано по рыночному минимуму: ${checked} из ${totalItems}` +
-          `${todo ? `, к переносу: ${todo}` : ""}. ${seen}${spent}`,
+          `${todo ? `, к переносу: ${todo}` : ""}. ${pause} ${spent}`,
         "warn"
       );
       return;
@@ -771,7 +860,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
       : "";
 
     status(
-      `${verdict}${gap}${history}${naming}${ours} Перелистни My listings и сканируй снова, чтобы взять следующие. ${spent}`,
+      `${verdict}${gap}${history}${naming}${ours} Все лоты аккаунта уже в списке — «Сканировать лоты» обновит цены. ${spent}`,
       todo || unsure ? "warn" : "ok"
     );
   }
@@ -813,47 +902,30 @@ async function mount(ctx: FeatureContext): Promise<void> {
     }
 
     try {
-      status("Читаю лоты на странице…", "work");
-      await refreshPage();
-      const listings = listingsOnPage();
       /**
-       * One request about ourselves, and only one. It does two jobs at once.
+       * One read, one path: Steam's own endpoint, paged by Steam's own count.
        *
-       * Steam does not always put the asset reference on the row, and cancelling a
-       * listing we cannot re-list is the one unrecoverable mistake here. And it
-       * names the complete set of our own listing ids — without which a lot priced
-       * exactly like ours cannot be told from our own lot on the next page, and
-       * undercutting that would be bidding against ourselves.
+       * There used to be a cheaper first reader — scrape the rows already drawn
+       * on the page, spare the network. It died with the old market: the page
+       * either draws twenty rows out of seven hundred or answers the whole URL
+       * with JSON. Either way the table is a fraction of the account, and a
+       * reprice that quietly covers a twentieth of it is worse than a slow one.
+       * The rows, the asset behind each, and the complete set of our listing
+       * ids all come from the same answer now — and they come complete.
        */
-      const blind = listings.filter((listing) => !listing.assetid);
-      state.ourIds = new Set(listings.map((listing) => listing.listingId));
-      if (listings.length && (blind.length || state.settings.exactCompetitorLow)) {
-        status(
-          blind.length
-            ? `Лотов ${listings.length}, без ссылки на предмет ${blind.length} — дочитываю…`
-            : `Лотов ${listings.length} — уточняю, какие лоты мои…`,
-          "work"
-        );
-        try {
-          const mine = await fetchMyListings(listings.length, pacing, (seen, total) => {
-            status(`Дочитываю свои лоты ${seen} из ${total}…`, "work");
-          });
-          applyAssetRefs(listings, mine.refs);
-          for (const id of mine.ids) state.ourIds.add(id);
-          state.ownershipComplete = mine.complete;
-        } catch (err) {
-          if (err instanceof SteamError && (err.kind === "aborted" || err.kind === "blocked")) throw err;
-        }
-      }
+      status("Читаю свои лоты…", "work");
+      const mine = await fetchMyListings(0, pacing, (seen, total) => {
+        status(`Читаю свои лоты ${seen} из ${total}…`, "work");
+      });
+      const listings = mine.listings ?? [];
+      for (const id of mine.ids) state.ourIds.add(id);
+      state.ownershipComplete = mine.complete;
 
       state.listings = listings;
       renderStats();
 
       if (!listings.length) {
-        status(
-          "На странице нет лотов. Открой Market → My listings и дождись, пока Steam нарисует строки — беру только их, без обхода всех страниц.",
-          "err"
-        );
+        status("Steam отвечает: активных лотов у аккаунта нет — сканировать нечего.", "err");
         setBusy(false);
         return;
       }
@@ -862,8 +934,8 @@ async function mount(ctx: FeatureContext): Promise<void> {
       const uniques = uniqueItems();
 
       status(
-        `На странице ${listings.length} лотов, уникальных ${uniques.length}. ` +
-          "Свои цены взял со страницы — спрашиваю только чужие…",
+        `Лотов ${listings.length}, уникальных ${uniques.length}. ` +
+          "Свои цены взял из ответа Steam — спрашиваю только чужие…",
         "work"
       );
       await priceAndPlan(uniques);
@@ -919,7 +991,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   async function loadHistory(): Promise<void> {
     if (state.busy) return;
     if (!state.groups.size) {
-      status("Сначала «Сканировать страницу» — историю качаю только для лотов на ней.", "warn");
+      status("Сначала «Сканировать лоты» — историю качаю только для отсканированных лотов.", "warn");
       return;
     }
 
@@ -1219,7 +1291,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     status("Останавливаю…", "warn");
   });
 
-  status("Открой Market → My listings и нажми «Сканировать страницу».");
+  status("Нажми «Сканировать лоты» — возьму все активные лоты аккаунта.");
   renderRows();
   renderStats();
 }

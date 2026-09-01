@@ -62,7 +62,8 @@
         "https://steamcommunity.com/id/*/tradeoffers*",
         "https://steamcommunity.com/profiles/*/tradeoffers*",
         "https://steamcommunity.com/tradeoffer/*",
-        "https://steamcommunity.com/*/*/badges*"
+        "https://steamcommunity.com/*/*/badges*",
+        "https://steamcommunity.com/my/badges*"
       ],
       "js": [
         "content.js"
@@ -75,18 +76,18 @@
     },
     {
       "matches": [
-        "https://steamcommunity.com/chat/*",
-        "https://steamcommunity.com/family/*"
+        "https://steamcommunity.com/chat*",
+        "https://steamcommunity.com/family*"
       ],
       "js": [
         "cm-play-bridge.js"
       ],
-      "run_at": "document_idle",
+      "run_at": "document_start",
       "world": "MAIN"
     },
     {
       "matches": [
-        "https://steamcommunity.com/chat/*"
+        "https://steamcommunity.com/chat*"
       ],
       "js": [
         "content.js"

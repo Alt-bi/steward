@@ -4,13 +4,14 @@ import { fetchJson, SteamError, type Pacing } from "./net";
 import { assetIndex, lookupAsset } from "./page-context";
 
 /**
- * Our own listings, read from what Steam has already drawn on this page.
- *
- * There is no request here on purpose: paging `GET /market/mylistings` to look at
- * a table the browser has already rendered spends the IP budget that the prices
- * need. What the page gives us is split across the row markup, the hover blob and
- * `g_rgAssets`, and each of those is missing under some conditions, so everything
- * is merged and nothing is trusted alone.
+ * Our own listings, read from Steam's own answer.
+
+ * There used to be a page reader here: scrape the table Steam had already
+ * drawn and spare the request. The SSR market killed it — the URL answers
+ * with JSON now, and where a table does get drawn it holds twenty rows of
+ * seven hundred. One reader remains: `myListingsPage` below, whose markup,
+ * hover block and assets merge through `assembleListings` — same three
+ * sources, complete instead of partial.
  */
 
 interface ListingInfo {
@@ -24,6 +25,12 @@ interface ListingInfo {
 }
 
 interface HoverRef {
+  appid: number;
+  contextid: string;
+  assetid: string;
+}
+
+export interface AssetRef {
   appid: number;
   contextid: string;
   assetid: string;
@@ -179,58 +186,11 @@ function buyerFromInfo(info: ListingInfo): Cents {
 }
 
 /**
- * Listings Steam has already painted. SIH never paginates `/market/mylistings`
- * just to look at the current page — neither do we.
- */
-export function listingsFromDom(
-  root: ParentNode | null,
-  extras: { assets?: SteamAssetIndex | null; listinginfo?: Record<string, ListingInfo> } = {}
-): Listing[] {
-  const hoverHtml = root instanceof Element ? root.innerHTML : "";
-  return assembleListings({
-    info: extras.listinginfo,
-    htmlRows: parseListingDoc(root),
-    hovers: parseHovers(hoverHtml),
-    assets: extras.assets ?? assetIndex(),
-  });
-}
-
-const LISTING_HOST_IDS = [
-  "tabContentsMyActiveMarketListingsRows",
-  "tabContentsMyActiveMarketListingsTable",
-  "tabContentsMyListings",
-];
-
-export function listingsOnPage(): Listing[] {
-  if (typeof document === "undefined") return [];
-  for (const id of LISTING_HOST_IDS) {
-    const host = document.getElementById(id);
-    if (!host) continue;
-    const found = listingsFromDom(host, { assets: assetIndex() });
-    if (found.length) return found;
-  }
-  try {
-    const rows = document.querySelectorAll?.('.market_listing_row[id^="mylisting_"]');
-    if (rows && rows.length) return listingsFromDom(document.body, { assets: assetIndex() });
-  } catch {
-    /* test stub has no querySelectorAll */
-  }
-  return [];
-}
-
-export interface AssetRef {
-  appid: number;
-  contextid: string;
-  assetid: string;
-}
-
-/**
  * listingid -> the item behind it.
  *
- * Which asset a listing holds is the one thing the page does not always say. The
- * classic market writes `CreateItemHoverFromContainer(...)` onto every row, and
- * that is where assetid comes from; layouts that drop it leave us able to cancel a
- * listing but not to re-list it, which is the worst possible half-success.
+ * Which asset a listing holds is the one thing the answer does not always say in
+ * plain fields; the hover block is what names it. Without it a lot can be taken
+ * off the market and not put back — the worst possible half-success.
  */
 function assetRefs(rows: readonly ListingInfo[]): Map<string, AssetRef> {
   const out = new Map<string, AssetRef>();
@@ -245,30 +205,6 @@ function assetRefs(rows: readonly ListingInfo[]): Map<string, AssetRef> {
     });
   }
   return out;
-}
-
-/** The map-keyed form, kept because the classic market still answers with it. */
-export function assetRefsFromListinginfo(
-  info: Record<string, ListingInfo> | null | undefined
-): Map<string, AssetRef> {
-  return assetRefs(
-    Object.entries(info ?? {}).map(([id, row]) => (row.listingid ? row : { ...row, listingid: id }))
-  );
-}
-
-/** Fills in listings the DOM could not resolve. Returns how many were repaired. */
-export function applyAssetRefs(listings: Listing[], refs: Map<string, AssetRef>): number {
-  let fixed = 0;
-  for (const listing of listings) {
-    if (listing.assetid) continue;
-    const ref = refs.get(listing.listingId);
-    if (!ref?.assetid) continue;
-    listing.assetid = ref.assetid;
-    listing.contextid = ref.contextid || listing.contextid;
-    if (!listing.appid && ref.appid) listing.appid = ref.appid;
-    fixed += 1;
-  }
-  return fixed;
 }
 
 /** What one `mylistings` answer told us about our own listings. */
@@ -291,6 +227,12 @@ export interface MyListingsPage {
    * lots sitting on the next page — and undercutting the second is bidding against
    * ourselves.
    */
+  /**
+   * Parsed rows for the page this answer described. The market hands us markup
+   * plus a hover block rather than a table now, so the rows only exist once
+   * someone parses them — this is where that happens for every reader at once.
+   */
+  listings?: Listing[];
   complete: boolean;
 }
 
@@ -319,8 +261,23 @@ interface MyListingsResponse {
    */
   hovers?: string;
   results_html?: string;
+  /** The `g_rgAssets` the markup was drawn from — same shape the page carries. */
+  assets?: Record<string, unknown>;
   total_count?: number;
   num_active_listings?: number;
+}
+
+/** Whether an answer is Steam stonewalling rather than an answer. Shared by both reads. */
+function myListingsEmpty(r: MyListingsResponse): boolean {
+  if (r.success === false) return true;
+  if (typeof r.total_count === "number" || typeof r.num_active_listings === "number") return false;
+  return rowsOf(r).all.length === 0 && hoverRefs(r).size === 0;
+}
+
+/** Parse a string of markup the way a page would. Null where there is no DOM. */
+function parseMarkup(markup: string): ParentNode | null {
+  if (!markup || typeof DOMParser === "undefined") return null;
+  return new DOMParser().parseFromString(markup, "text/html") as unknown as ParentNode;
 }
 
 /** listingid -> asset, from the hover block. Empty on the older JSON shapes. */
@@ -369,7 +326,21 @@ export function myListingsFrom(data: MyListingsResponse): MyListingsPage {
   /** The JSON shapes win where both spoke; the hovers fill in what they did not. */
   for (const [id, ref] of hovers) if (!refs.has(id)) refs.set(id, ref);
 
+  /**
+   * The rows, assembled the same way a page would assemble them: markup for
+   * name and price, hovers for the asset, `assets` for the hash. This is what
+   * makes the scan work on a page Steam now serves as bare JSON — there is no
+   * DOM table to read, so the markup in the answer is read instead.
+   */
+  const listings = assembleListings({
+    info: Object.fromEntries(all.filter((r) => r.listingid).map((r) => [String(r.listingid), r])),
+    htmlRows: parseListingDoc(parseMarkup(String(data.results_html ?? ""))),
+    hovers: parseHovers(String(data.hovers ?? "")),
+    assets: (data.assets as SteamAssetIndex | undefined) ?? assetIndex(),
+  });
+
   return {
+    listings,
     refs,
     ids,
     seen,
@@ -418,10 +389,13 @@ export async function fetchMyListings(
   const total = first.total;
   const seen = new Set(first.page.seen ?? first.page.ids);
   onProgress?.(seen.size, total);
+  const listings = [...(first.page.listings ?? [])];
+  const listed = new Set(listings.map((row) => row.listingId));
   const page: MyListingsPage = {
     refs: new Map(first.page.refs),
     ids: new Set(first.page.ids),
     seen,
+    listings,
     complete: false,
   };
 
@@ -443,6 +417,11 @@ export async function fetchMyListings(
     }
     for (const id of next.page.ids) page.ids.add(id);
     for (const [id, ref] of next.page.refs) if (!page.refs.has(id)) page.refs.set(id, ref);
+    for (const row of next.page.listings ?? []) {
+      if (listed.has(row.listingId)) continue;
+      listed.add(row.listingId);
+      listings.push(row);
+    }
     /** A page that said "100 more" and brought nothing new is Steam being done. */
     if (!next.expectMore || fresh === 0) break;
     onProgress?.(seen.size, total);

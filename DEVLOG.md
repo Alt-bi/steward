@@ -1231,3 +1231,207 @@ Fix:
 Lesson: "no errors" does not mean "has work". A running farm with an empty
 claim must state WHY from the scan, in the status line, not in a log nobody
 opens.
+
+## 2.31.0 - the factory compared its plan against its own plan
+
+The user's report was «фарм больше не работает, хотя раньше работал». Four
+separate mechanisms could each produce exactly that, and all four were live at
+once. None of them announce themselves: every one of them ends in a green
+«Фабрика идёт: в игре 8» over a socket that carries nothing.
+
+**1. The rotation never re-claimed after a reload.** `tick()` decided whether
+to push a new claim by comparing the fresh bench against `storage.playing` —
+its own previous *intent*. The socket's actual claim lives in the MAIN bridge,
+in page memory, and page memory dies on every F5, Edge sleep, and extension
+update (2.30.2 made updates reload every Steam tab *by design*). After any of
+those the bridge holds nothing while storage still lists eight games: the two
+match, `changed` is false, the swap is skipped, and the factory farms air
+forever. Fix: the bridge answers `cm-play/state` with the appids actually on
+the wire, and `claimChanged()` (pure, 5 tests) compares against that — an
+unanswered bridge counts as "nothing claimed", never as "no change". Plus
+`resumeClaim()` on mount: the bench goes back on the wire in seconds, retrying
+while the chat client logs in, instead of waiting out a 30 s lease and a
+20-page scan.
+
+**2. A badge page that parsed to nothing was called a COMPLETE scan.**
+`scanBadges` returned `complete: true` the moment a page yielded zero rows -
+including page one. Feed that to `farmTick` and the rule "absence in a complete
+scan means finished" fires for every game at once: the whole bench is evicted,
+marked finished forever, and the factory closes with «дропов нигде не
+осталось». One renamed CSS class on Steam's side would silently retire a farm
+that still owed hundreds of cards. Now a walk is complete only if it read rows
+or Steam's own footer says zero badges; a scan that read nothing raises a real
+error, leaves the claim alone, and retries.
+
+**3. The socket was found by a private Steam field name.**
+`g_FriendsUIApp.m_CMInterface.m_Socket` / `.m_Session.m_nSessionID` are
+internals with no contract; a rename kills the farm with no diagnosis. The
+bridge now also wraps the WebSocket constructor (Proxy, so `instanceof` and the
+statics are untouched) and reads the CMsgProtoBufHeader off any outgoing frame:
+the socket that sends a parseable CM frame *is* the CM socket, and its header
+carries our steamid and session id. The chat's own ~9 s heartbeat hands us both
+without touching a single Steam symbol. Field names stay as the fast path; the
+sniffer is the floor. The bridge also moved to `document_start` (it must exist
+before the socket is constructed) and re-claims immediately when a reconnect
+swaps the socket, instead of waiting out the keep-alive.
+
+**4. `/chat` with no trailing slash was not a chat page.** Content scripts and
+`chrome.tabs.query` both matched `.../chat/*`, and Steam's own links land on
+`.../chat`. On such a tab the panel never mounted, and «открыть фабрику» could
+not find it - so it opened a *second* chat tab, and every duplicate is another
+ghost that can grab the farm lease. Patterns are `.../chat*` now, and
+`farm/open` changes only the hash of the tab it found (navigating `/chat` ->
+`/chat/` is a full reload, which drops the socket and the claim it was holding).
+
+Also: the wire gets its own line in the panel («Чат: сокет жив, заявлено 8» /
+the bridge's real reason when it is not), because every «не работает» report so
+far was the page believing storage; `replayRaw`'s header parse was reading the
+field-2 tag as part of the sessionid varint (off by one) and now uses the real
+parser; the stat label said «дропадось».
+
+**5. The orphaned tab shouted forever.** An extension update (or a Reload in
+edge://extensions) does not migrate content scripts already running in a tab:
+`chrome.*` is severed and throws «Extension context invalidated» on every call.
+The farm arms three permanent timers - a 5 s watchdog, a 10 s heartbeat, a scan
+loop - and each was `void asyncCall()`, which discards the value but NOT the
+rejection. So a chat tab left open across an update printed that error every
+few seconds until it was closed, and of course farmed nothing while doing it.
+`content/ui/orphan.ts` now owns every timer we arm: the first sign of a severed
+bridge (a failing `chrome.runtime.id`, an orphan rejection caught by one
+`unhandledrejection` listener) retires all of them at once and shows the single
+«обнови страницу (F5)» notice. `isOrphanError` is pinned by tests so a Steam
+failure is never mistaken for a dead bridge.
+
+Canonical: 698/698, typecheck and build clean.
+
+Lesson, again and sharper: a component must never be asked to confirm itself.
+The factory's plan cannot verify the factory's plan - only the socket knows
+what Steam was told, only the badge footer knows whether a scan really ended.
+Every silent death here was a loop that closed on its own memory.
+
+## 2.32.0 - one rule instead of four ways to exclude everything
+
+The user pressed Start and got a red line: «Крутится впустую: список «×» съел
+все 5 игр с дропами». Twice now the factory has been fully operational and
+farming nothing, both times because the user had, at some point, told it not to
+farm the only games it could. The 2.30.5 fix gave that state an undo button.
+This one deletes the state.
+
+**What is gone, and why it existed to begin with.** The factory carried four
+separate ways to narrow what it farms: a tick-list with «все»/«снять», a
+«Отмеченные → в фабрику» queue, an «фармить все игры с дропами» auto switch,
+and a «×» that banned a game forever. Each was defensible alone; together they
+were four independent chances to end up with an empty intersection, and the
+panel could only report the result, never the intent. The user asked for the
+obvious thing and he is right: **farm everything Steam still owes cards for**.
+No queue, no ticks, no modes, no ban list.
+
+- `farm/engine.ts` lost `queued`, `dropped` and `auto` from its input. One
+  rule: the bench keeps its seats, everything else owed joins in scan order,
+  capped at 32; the rest is `waiting` (a count for the status line, not a list
+  to manage). The eviction rules did not change - a row saying zero always
+  finishes a game, absence only finishes it on a COMPLETE scan.
+- `FarmState` lost `queue`, `dropped`, `auto` and `starve`. `readFarm()` simply
+  stops reading them, so the user's five banned games come back by themselves
+  on the next scan - no migration, no button to press.
+- `farm/open` no longer seeds anything; its request payload is empty, and the
+  worker stopped writing a queue nobody reads.
+
+**Visual cleanup.** The tab now reads top to bottom: three counters, four
+buttons (Старт · Стоп · Пересчитать · Забрать себе), one line about the socket,
+one list, one log. Half the old markup was styling nothing: `.stw-chip`,
+`.stw-mini`, `.stw-farm-info`, `.stw-farm-list` had no CSS at all, while the
+stylesheet still carried `.stw-farm-legend`, `.stw-farm-row-done` and
+`.stw-farm-done` from a shape that shipped and was replaced. The list reuses
+the row styles that were already there and were never wired up: a green left
+border marks the games actually on the bench, so «what is being farmed right
+now» is answered by looking, not by counting chips.
+
+Canonical: 698/698 (farm engine tests rewritten around the single rule),
+typecheck and build clean.
+
+Lesson: an option that can produce «running, excluding everything» is not a
+feature with a missing guard - it is a feature with no default worth having.
+The fix for the second occurrence was not a better error message.
+
+## 2.32.1 - the tick froze the buttons it had just used
+
+«Панель есть, но после сканирования кнопка «Старт» недоступна.» My regression,
+introduced one version earlier, and a small one with a large blast radius: the
+factory could not be started at all.
+
+`render()` draws the buttons from the tick's own flag — `btnStart.disabled =
+busy || leaderBlocked || state.running` - and the rewritten `tick()` called
+`render()` from *inside* its `try`, while `busy` was still up. `busy` came down
+a moment later in `finally`, with nothing left to repaint. So every completed
+scan ended with «Старт» and «Пересчитать» disabled and nothing on the page able
+to bring them back.
+
+Fix: `tick()` no longer draws. The scan-and-rotate half moved into `runTick()`,
+which returns the one status line that must survive the redraw (finished /
+failed) or null, and the single `render()` happens after `finally` has cleared
+`busy`. One redraw per tick, always after the flag is down.
+
+**The reason this shipped at all: the interface had no tests.** The engine had
+eleven, the wire had five, and the thing the user actually touches had none -
+so three fixes in a row went out on reasoning alone. `test/support/dom.ts` is
+now a small DOM shim (installed on demand, timers recorded rather than armed,
+the other tests keep the lean stub), and `farm-mount.test.ts` builds the tab
+for real:
+
+- it mounts without throwing - a `mount()` that throws is caught per feature by
+  `boot()`, which reads to the user as an empty tab and one console line;
+- it offers exactly «Старт · Стоп · Пересчитать · Забрать себе», no inputs, and
+  none of the deleted controls;
+- a queue and a ban list left in storage by an old build change nothing;
+- **«Пересчитать» leaves «Старт» usable** - verified to fail against the bug
+  before being committed as a pass.
+
+Also reverted here: the `window.WebSocket` Proxy from 2.31.0. Swapping a global
+constructor out from under a page the size of the chat client risks breaking
+the chat itself, and a broken chat is indistinguishable from a broken farm.
+`WebSocket.prototype.send` is patched instead - no identity the page can
+observe changes, no per-socket bookkeeping, and it catches sockets that existed
+before us as well as every reconnect.
+
+Canonical: 702/702, typecheck and build clean.
+
+Lesson: «I cannot test the UI offline» was a decision, not a fact. Three
+user-visible breakages were paid for before writing the sixty lines that make
+the interface testable.
+## 2.33.0 — the farm starts in seconds, and says what it is doing while it worksThree complaints, one root each. All from the same session: the factory finallyfarmed, but only after a minute or two of a red panel that looked broken.1. **«Why did it say the chat placed nothing?»** Because `running` with an empty   bench was hard-coded as an error, and pressing «Start» produces exactly that   state for as long as the badge walk takes. The status machine now has a   warm-up: an empty bench is «Запускаюсь» until a scan has completed in this   tab (`scanned`), and only after that can it be red. A red line the user   cannot act on trains them to ignore red lines.2. **«It only started farming after 1-2 minutes.»** True, and it was structural:   the whole bench was decided from a finished 20-page walk that the shared net   gate paces to a few pages a minute. `primeBench()` now claims the most-owed   games off **page one alone** — seconds after Start — and the full walk   corrects the bench when it lands. One extra page request, and only when the   bench is empty, so a working factory never pays for it.3. **«The scan shows no progress, it feels frozen.»** It was frozen, from the   panel's point of view: `scanBadges` had an `onProgress` nobody passed, and it   only fired after a page was read — i.e. once per ten seconds of waiting.   It now reports `BadgeScanProgress` twice per page (before the fetch, after   the parse) and the panel draws a bar plus «Бейджи: 47 из 296» from it.   `paintScan()` deliberately touches nothing but the bar and the status —   drawing the controls from inside a running tick is the 2.32.0 frozen-buttons   bug, and it must not come back through the progress path.Design pass on the tab while it was open: the bench is listed first instead ofbeing scattered through a drops-sorted list, playing rows carry a «в игре» tagnext to the green border, each row shows cards collected out of the set, thecounters became в игре / ждут очереди / дропов осталось («бейджейпрочитано» was a diagnostic, and it now lives in the scan bar), Start isgreen and Stop is red because one of them removes something, and the log isseparated by a rule instead of floating under the list.Test harness: `installBridge()` joins the DOM shim. `bridgeCall` posts into thepage world and waits five seconds for a reply that never comes in node, soevery path that touches the socket was either untested or silently written offas «чат не ответил» — including the one this release adds. The fake answerslike the MAIN bridge does, on a later turn, and records what was claimed.Two new tests, both verified against the bugs they pin (removed the fix, theyfail; restored it, they pass): the warm-up status, and the page-one claimreaching the wire before the walk finishes. 704 green.Lesson, again and more specifically than last time: every one of these threewas the panel being silent or wrong about work it was actually doing correctly.The farm mechanism was fine. What shipped broken was the account it gave ofitself.Found while wondering why the suite suddenly took six seconds: `bridgeCall`armed a five-second timeout and never cleared it after the reply arrived. Thefarm makes one of those per tick, per swap, per resume — harmless in a browser,but it is a lit fuse per call and it was measurable the moment tests startedusing the socket. Cleared on settle; the suite went back to 1.4 s.## 2.34.0 — /market and /inventory, measured against the live accountThe user opened a logged-in Steam tab, so for the first time this session thequestion «is it broken» had an answer that was not a guess. Every parser in themarket and inventory paths was run against what steamcommunity.com actuallyserved on 2026-09-01, by bundling the repo's own functions and evaluating themin the page — not a re-implementation, the shipping code.What was healthy, stated so it is not re-investigated: `/market/mylistings`(704 active listings, `results_html` + `hovers` + `assets`), the classic rowmarkup (`.market_listing_price_with_fee` is gone but the price fallback alreadyreads the two-line cell), `priceoverview`, `search/render`, the inventory JSONendpoint, `projectVisibleInventory` (25 of 25 tiles, names and contexts right),and the whole rewritten item page — `projectSsr` returned currency 5, countryRU, the order book, the histories, and our own lot flagged `bMine`.Two real defects, both invisible from inside:1. **Every listing on /market lost its assetid and contextid.** The rows live in   `#tabContentsMyActiveMarketListingsRows`; the blob of   `CreateItemHoverFromContainer(...)` calls lives in a page-level `<script>`   outside it. Hovers were parsed from the rows container, so they were never   found. Nothing failed loudly — the reprice run simply declared all 704 rows   «blind» and paged `/market/mylistings` to recover what the page had been   holding all along, at the hardest-rationed request budget in the extension.   The contextid default made it worse than slow: cards are context 6, and the   fallback said 2.2. **The item page's minimum was thrown away when Steam shipped a null.** A busy   commodity (Fracture Case) carries `min_price: 6021` in its bucket; a thin   trading card carries `min_price: null` on a page whose own order book states   the cheapest lot outright. `bucketMinimum` now falls through to   `orderBook().minSell` — same page, same document, no request.Also removed an `instanceof Element` that throws outright wherever `Element` isnot a global. It never fired in a browser, which is exactly why it survived.Design pass on the tabs the user named. They opened as three or four stackedrows of anonymous dropdowns and number boxes whose only explanation was a`title` nobody hovers. `field()` / `narrowField()` in the panel put a name overeach control; `.stw-actions` grew a rule above it, so a tab now readssettings → do it → results instead of one undifferentiated wall. Controls wrapand align on their own baseline, rows have a hover, empty states have room.`mount-all.test.ts`: every registered feature is now built on the page itclaims, and asserted to draw something and to offer at least one control thatis not dead on arrival. Building it immediately paid for itself twice — sixfeatures exercised `replaceChildren`, which the DOM shim did not have (so theshim grew `replaceChildren`, `remove`, `closest` and a tiny selector matcher),and `registry.test.ts` turned out to have been asserting a feature list thatsilently omitted `offers`, because it only imported seven of the eight.720 tests. Both fixes verified against their own bugs: reintroduced, the newtests fail; restored, they pass.## 2.35.0 — Steam lies quietly, and the scanner believed itReport: «Steam дважды прислал веб-страницу вместо данных книги лотов… 0 из 10.Запросов 3.» Three requests, ten items, nothing checked.Measured on the live account rather than reasoned about. `QueryListingsForItem`answers JSON from a page context with the loader header, without it, and withthe classic AJAX signature — so the header an earlier session added as the curewas never the gate. What the endpoint actually does under pressure is degrade intwo stages: first `200 {data: {total_count: 0, listings: []}}` for an item whosebook it returned in full a minute earlier, then the market homepage as markup.Fifteen calls in two minutes was enough to see both; a one-minute pause restoredthe truth.Stage 1 is the expensive one, because it is indistinguishable from an answer.`total_count: 0` was read as proof that `strItemName` is not a name Steamanswers to — the Counter-Strike group-id wall — so the app went into`unnamedApps` and every remaining item was skipped without a request. Ten items,one lie, zero checked, and a status line about naming that had nothing to dowith what happened.The tell costs nothing and cannot be wrong: **we are selling the item we areasking about.** Our own live lot is in that book by definition, so zero is not apossible answer. `scanCompetitors` now passes `emptyIsRefusal` whenever thatholds, and the one case where an empty book really is a naming problem — a hashname on a group-id app, asked before a group id has been learned — is stated bythe caller (`nameMayBeWrong`) instead of being inferred from the reply. Inferringa permanent fact from a transient refusal was the whole bug.Two smaller pieces of the same shape:- Markup where JSON belongs is reported to the governor as `rate_limited`, not  as a plain error. It always was a refusal; filing it as an error is why the  pace never dropped on the way to stage 2. The thrown error stays `not_json`,  so the caller that reads the page's own title still does.- The empty book gets the same two-strike rule the markup page has, and its own  stop reason: «Steam дважды ответил «лотов нет» про предметы, которые сам же и  продаёт». A user who is told the truth about a throttle waits; a user told  about a naming problem goes looking for a bug that is not there.Worth recording about yesterday's fix, too: the hovers bug had every reprice runpaging `/market/mylistings` for all 704 listings to recover data the page wasalready holding. That is the load that buys a penalty box. Fixing the readfixed the pressure as well.721 tests.## 2.36.0 — «Запросов 0»: the run that refused itselfSame message as 2.35.0, but the number at the end had changed to zero, and thatone word was the whole diagnosis. The scan was not failing at Steam. It wasfailing before it got there.Two mechanisms, stacked:1. **The refusal verdict never expired.** `BookLiveness.dead` was a flag that   only `scan()` cleared. «Догрузить цены» does not call `scan()`, so after one   bad minute every press returned instantly, asked nothing, and printed a   sentence about two web pages that had arrived minutes ago. It now stands for   two minutes and then lets the next run ask again — the refusal it describes   is a throttle that is over in about a minute, measured.2. **Exact mode had switched the other endpoint off.** `cacheOnly = exact`: in   exact mode the price pass makes no requests at all, because the listing book   answers better and cheaper. Correct — right up until the book is the thing   refusing, and then it is exactly backwards. With the book dead and the price   pass held to the cache, the run had no way left to learn anything, so it   made zero requests, changed nothing, and reported «посчитано по рыночному   минимуму: 0 из 10» having computed no minimum whatsoever.So the fix is not a new endpoint. `priceoverview` and `search` were untouchedand working the entire time — they are what SIH-shaped tools price from, andthis build had them switched off precisely when they were the only thing left.Exact mode now inverts when the book refuses, and after a «gone» or «lying»stop the run makes a rescue pass for whatever is still unpriced. The user askedwhether we could just do what SIH does; the honest answer is that we alreadydid, and had disabled it by accident.The «gone» status line also stopped lying about tense: it now distinguishes«this just happened» from «the verdict is still standing, N seconds left».Test harness, third expansion this week and the one that finally reaches themarket tab: the DOM shim grew `getAttribute`/`setAttribute`, a `byId` map forwhat Steam has already drawn, `document.scripts`, and a small selector matcher(comma lists, tag/class/id, one attribute test) — enough to run`.market_listing_row[id^="mylisting_"]` against real nodes and no more thanthat. `reprice-market.test.ts` mounts the tab on a /market page with two rowsand a hover script, hands the book a homepage, and asserts the run ends withtwo items priced and a non-zero request count. Verified against the bug: withthe fallback removed it fails.724 tests.
+## 2.36.1 — the market moved, the scanner follows
+
+`/market/mylistings` stopped being a page. Steam now answers the URL with raw
+JSON (`contentType: application/json`) — no table, no hosts, no `g_rgListingInfo`.
+The reprice scan read the DOM first, found zero rows, and told the user "no
+listings on the page" while the account held 703 lots. Probes on a live account:
+`mylistings?count=100` still answers with `results_html` + `hovers` + `assets`
+(the whole table, as markup inside JSON); `search/render` answers with
+`sell_price` in the wallet currency; `priceoverview` with the FULL prefixed
+hash answers, with the trimmed hash it returns a naked `{"success":true}`.
+
+- The scan now has one reader: `fetchMyListings` paged by Steam's own
+  `total_count`, rows assembled from the answer's markup + hovers + assets
+  through the same `assembleListings` the DOM path used. Complete by
+  construction — the drawn page only ever showed ~20 of 700 lots, so the old
+  "read the page first, spare the budget" path could not price an account at
+  all; a partial reprice that quietly covers a twentieth is worse than a full
+  one that says what it reads.
+- Dead weight removed: the DOM-page readers (`listingsOnPage`, `listingsFromDom`,
+  `hoverBlobOnPage`, `assetIndexOnPage`, `assetRefsFromListinginfo`,
+  `applyAssetRefs`) — nothing calls them now, and the next Steam layout change
+  would have made them lie again.
+- The buy-orders tab is gone. `mybuyorder_` rows appear nowhere — not on the
+  market home, not on `mybuyorders/` (a megabyte of HTML, zero order rows);
+  the tab mounted on the wrong URL anyway and always showed an empty table.
+  Its parser, the `cancelBuyOrder` write, and their tests leave with it.
+  `buyListing` stays — the item page still buys.
+- Honest copy: «Сканировать страницу» → «Сканировать лоты», no more "turn the
+  page and scan again" advice for a scan that pages everything itself.
+
+Live proof on the bot account (703 lots): scan reads «Читаю свои лоты …», then
+prices item by item through the competitor book («Смотрю чужие лоты 14/642 ·
+Surprised Hana (Металлическая) · бюджет запросов 4с»), «Стоп» halts it cleanly:
+«Остановлено: проверено 14 из 642. Запросов 16». 681 tests pass; the two
+reprice-market tests now feed the SSR JSON shape instead of a drawn table.

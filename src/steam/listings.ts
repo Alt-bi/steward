@@ -133,13 +133,29 @@ export interface BookPage {
   total: number | null;
 }
 
+export interface BookOptions {
+  /**
+   * Treat a book of zero as Steam refusing rather than answering.
+   *
+   * Set when we are ourselves selling the item asked about: our own live lot is
+   * in that book by definition, so `total_count: 0` cannot be true. Measured on
+   * 2026-09-01 — fifteen quick calls in, the endpoint started answering `{data:
+   * {total_count: 0, listings: []}}` for a card whose book it had just returned,
+   * and went back to the truth after a minute's pause. Read as an answer it says
+   * «nobody is selling this», which is how a scan of ten items checked none of
+   * them and reported it as a naming problem.
+   */
+  emptyIsRefusal?: boolean;
+}
+
 export async function fetchListingBook(
   appid: number,
   itemName: string,
   pacing: Pacing,
   count = BOOK_PAGE,
   /** Keep only this item of the group; omit on a page that holds just one. */
-  hash?: string
+  hash?: string,
+  opts: BookOptions = {}
 ): Promise<BookPage> {
   /**
    * The query object the rewritten frontend itself sends — filters included,
@@ -170,7 +186,11 @@ export async function fetchListingBook(
      * with a name Steam does not answer to. Only a reply with no `data` block at
      * all is Steam declining to speak.
      */
-    isEmpty: (d) => !(d as BookResponse)?.data,
+    isEmpty: (d) => {
+      const body = (d as BookResponse)?.data;
+      if (!body) return true;
+      return opts.emptyIsRefusal === true && body.total_count === 0;
+    },
   });
 
   const body = data.data;
@@ -317,6 +337,20 @@ export function scanWindow(ourCount: number): number {
 }
 
 /** One request: the market minimum, the competitor behind it, and which is which. */
+export interface ScanOptions {
+  /**
+   * Whether an empty book could honestly mean «wrong name».
+   *
+   * Both stories end in `total_count: 0` for an item we hold a lot of, and they
+   * need opposite responses: a hash name on a group-id app is wrong forever and
+   * must be learned around, while a throttled book is right again in a minute
+   * and must never be recorded as a fact. The caller is the only one that knows
+   * which is possible here — it knows whether it asked with a learned group id,
+   * and whether this app hides its items behind one at all.
+   */
+  nameMayBeWrong?: boolean;
+}
+
 export async function scanCompetitors(
   appid: number,
   hash: string,
@@ -329,7 +363,8 @@ export async function scanCompetitors(
    * to instead of `market_hash_name`. Given, the book covers every wear of the
    * skin, so `hash` keeps only this item's rows.
    */
-  groupName?: string
+  groupName?: string,
+  opts: ScanOptions = {}
 ): Promise<CompetitorScan> {
   const count = scanWindow(ourCount);
   const book = await fetchListingBook(
@@ -337,7 +372,8 @@ export async function scanCompetitors(
     groupName ?? hash,
     pacing,
     count,
-    groupName ? hash : undefined
+    groupName ? hash : undefined,
+    { emptyIsRefusal: ourCount > 0 && opts.nameMayBeWrong !== true }
   );
   return competitorFromListings(book.listings, ourListingIds, count, book);
 }

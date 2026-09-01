@@ -4,9 +4,9 @@ import { register, type FeatureContext } from "../registry";
 
 /**
  * The badges page is not where farming happens - it only hands off. Every card
- * interface (scan, checkbox queue, rotation, drop ledger) lives on the /chat
- * page at #stw-farm, beside the CM socket that carries the claim: one window,
- * one tab to keep open, like the factory the user came from.
+ * interface (scan, rotation, drop ledger) lives on the /chat page at
+ * #stw-farm, beside the CM socket that carries the claim: one window, one tab
+ * to keep open, like the factory the user came from.
  *
  * Why the old tab and its ASF/bot mode are gone: the self-hosted holder CT
  * was torn down (2026-08-31) and the chat client was proven to drip cards.
@@ -20,20 +20,20 @@ async function mount(ctx: FeatureContext): Promise<void> {
   openBtn.type = "button";
   openBtn.title =
     "Фабрика живёт во вкладке чата - там же, где ходит заявка в Steam: " +
-    "скан бейджей, очередь, ротация, журнал дропов.";
+    "скан бейджей, ротация, журнал дропов.";
 
   section.body.append(
     el(
       "p",
       "stw-hint",
-      "Фарм карточек переехал на страницу чата: одна вкладка вместо двух, тот же приём, что у Card Factory. Открой фабрику кнопкой - отмечать игры и считать дропы будешь там."
+      "Фарм карточек живёт на странице чата: там же, где ходит заявка в Steam. Фабрика сама считает бейджи и выбивает всё, за что Steam ещё должен карточки - настраивать нечего."
     ),
     openBtn
   );
 
   openBtn.addEventListener("click", () => {
     void (async () => {
-      const r = await send("farm/open", { appids: [] });
+      const r = await send("farm/open", {});
       section.setStatus(
         r.ok ? "Фабрика открылась во вкладке чата" : "Не удалось открыть вкладку чата",
         r.ok ? "ok" : "err"

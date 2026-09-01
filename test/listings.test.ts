@@ -217,15 +217,21 @@ describe("fetchListingBook, over the wire", () => {
     description: { market_hash_name: "Item" },
   });
 
-  it("hands back an empty book instead of throwing it away", async () => {
+  it("hands back an empty book instead of throwing it away, when the name may be wrong", async () => {
     /**
      * The regression this exists for. An empty book used to be reported to the
      * governor as a throttle and raised as an error, so the one fact worth having
      * — `total_count: 0`, which proves the name wrong — never reached the caller,
      * and four Counter-Strike items in a row backed the whole scan off.
+     *
+     * `nameMayBeWrong` is what makes this reading legal: a hash name on a
+     * group-id app really does answer empty forever. Without it, the same reply
+     * about an item we are selling is a refusal — see the test below.
      */
     setSteam(() => jsonReply({ data: { listings: [], total_count: 0, more: false } }));
-    const scan = await scanCompetitors(730, "Fracture Case", new Set(), {}, 1);
+    const scan = await scanCompetitors(730, "Fracture Case", new Set(), {}, 1, undefined, {
+      nameMayBeWrong: true,
+    });
 
     assert.equal(scan.unnamed, true);
     assert.equal(scan.seen, 0);
@@ -233,6 +239,28 @@ describe("fetchListingBook, over the wire", () => {
     assert.ok(
       !reports.some((r) => r.outcome === "empty"),
       "an answered book must not count against the request budget as a refusal"
+    );
+  });
+
+  it("calls an empty book a refusal when we are ourselves selling the item", async () => {
+    /**
+     * Measured 2026-09-01: fifteen quick calls in, `QueryListingsForItem` began
+     * answering `{total_count: 0, listings: []}` for a card whose book it had
+     * just returned in full, and told the truth again after a minute's pause.
+     *
+     * Our own live lot is in that book by definition, so zero cannot be an
+     * answer here. Read as one it said «nobody is selling this» — and the scan
+     * recorded that as a naming problem, wrote the whole app off, and checked 0
+     * of 10 items while reporting no error the user could act on.
+     */
+    setSteam(() => jsonReply({ data: { listings: [], total_count: 0, more: false } }));
+    await assert.rejects(
+      () => scanCompetitors(753, "489260-Rock Golem (Foil)", new Set(["7"]), {}, 1),
+      (err: Error) => (err as { kind?: string }).kind === "empty"
+    );
+    assert.ok(
+      reports.some((r) => r.outcome === "empty"),
+      "the governor has to hear this one — it is why the next call gets a homepage"
     );
   });
 

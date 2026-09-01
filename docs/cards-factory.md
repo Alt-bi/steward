@@ -1,10 +1,39 @@
-# Cards Factory — plan (feature `cards`, page `/my/badges`)
+# Cards Factory — feature `farm`, page `/chat` (#stw-farm)
 
-Goal: see which games still have card drops, then earn those drops like SteamLVLUP
-Card Factory does — up to 32 games in a stream. GitHub only until the user says
-otherwise.
+Goal: farm card drops like SteamLVLUP Card Factory — up to 32 games in a
+stream — with nothing but the browser the user already logged into. GitHub
+only until the user says otherwise.
 
-## Reality captured 2026-08-31 (live probes, read-only, bot account)
+## Where the interface lives (2026-08-31, final shape)
+
+- **`/chat` page, panel tab «Фабрика карточек»** — the whole machine: badge
+  scan (stats + checkbox list), queue, rotation (evict finished, promote next),
+  auto-mode, drop log. It talks to the MAIN bridge through the local relay, so
+  the claimed set and the socket live in the same tab. `#stw-farm` opens the
+  tab straight onto this section (hashchange-aware).
+- **`/my/badges` keeps no UI** — one button «Открыть фабрику карточек»
+  (feature `cards`), and the popup button does the same. Two windows used to
+  split the controls from the socket; the user asked for one window.
+- Engine options ASF-бот/steam://run are gone: the holder CT was torn down and
+  the chat client is proven (user-confirmed drop delta on 2.29.x). The old
+  badges tab remains in git history if the client-launch mode is ever wanted.
+
+## The engine (how the claim reaches Steam)
+
+The chat page's own CM websocket carries `CMsgClientGamesPlayed` (EMsg 742).
+Our encoder is byte-identical to a golden frame captured off a working Card
+Factory run (`cm-play.test.ts` pins it). Steam credits the *web session* — no
+server, no bot, no password; the only oracle for "dropped" is the badge page
+counter («пересчитать» / the factory's own 5-min scan). Closing the chat tab
+ends the claim; that is Steam's model, not our bug.
+
+Rotation: every 2 min the factory rescans `/my/badges` (SSR pages, 150 rows),
+`farmTick` (pure, `farm/engine.ts`, 11 tests) decides — counter zero on a
+complete scan ⇒ finished (never revived), promote the next up to 32, swaps
+ride `cm-play/swap` so the ~25 s keep-alive never idles. A partial scan can
+never mark a game finished; an all-failed scan never ends the run.
+
+## Reality captured 2026-08-31 (live probes, read-only)
 
 - `/my/badges` is **SSR now**, like the market went in 2026. The old
   `ajaxallbadges?p=N` fragment endpoint answers with a full SSR page — there is
@@ -18,74 +47,11 @@ otherwise.
   `/gamecards/<appid>/` overlay anchor is its sibling. The dependable source is
   the row id `badge_gamebadge_<appid>_<badge_type>_<n>`.
 - A gamecards page (`/id/<user>/gamecards/730/`) no longer carries
-  `start_flash_session_button` / Start Playing — the browser-side
-  «launch to earn drop» button is gone. Browser-emulated launching is dead;
-  this decides phase 2.
-- The probe counted 17 rows with drops remaining on the bot account; drop
-  source («Drops earned by purchasing») shows on rows — F2P-without-purchase
-  games can be filtered out before farming them.
-
-## Phase 0 — scanner — SHIPPED in 2.26.0 (notes below)
-
-`src/steam/badges.ts`:
-- fetch `…/my/badges/?l=english&p=N` (fetchText, SSR page) until a page carries
-  no rows or the footer total is covered; kind `badges` added to NetKind/LIMITS
-  at a reading rate; cached for the page lifetime like wears.
-- parse rows by the anchors above → `{ appid, name, dropsRemaining,
-  cardsCollected, cardsTotal, foil, source }`; skip foil rows, skip
-  «No card drops remaining».
-- `test/fixtures/badges-page1.html` + a live-shapes test on the captured page —
-  same rule as the other four fixtures: captured verbatim, recaptured not
-  hand-edited. The repo is PUBLIC, so capture must redact first (profile
-  names/URLs, steamID, avatars) — the capture script asserts nothing personal
-  survives. Parsing itself is regex-over-text like `hoverRefs`, no DOM needed.
-
-Success check: scanner finds the same 17-row list the probe found, in ≤2 requests.
-
-## Phase 1 — «Карточки» section on /my/badges — SHIPPED in 2.26.0 (notes below)
-
-- list unfinished sets with a checkbox per game, «N дропов», price of the set via
-  the existing price pipeline (sum of cheapest cards) so farming sorts by money;
-- select → «в очередь» (max 32); status counts what dropped since (rescan diff).
-
-## Phase 2 — earning the drops (execution engine) — SHIPPED in 2.27.0
-
-Shipped shape: mode select (steam://run / ASF-бот), `asf/exec` through the
-worker (loopback host permission), `play` in 32-appid batches, `reset` to
-stop, `тест` pings `status`. The engine itself (ASF install + login) stays
-the user's step — docs below say how.
-
-The drop is a **Steam-protocol** event (a playing session), not a web call. The
-flash-session button is dead, so a content script cannot «launch» anything. Two
-honest executors:
-
-- **A. `steam://run/<appid>`** opened from the panel: the installed Steam client
-  really launches the game and time accrues. Works today, zero infra. 32
-  simultaneous games means 32 real processes — fine for a strong gaming PC, not
-  for a laptop; Valve also caps how fast drops accrue.
-- **B. ASF (ArchiSteamFarm)** — the real «32 games in a stream», same trick
-  SteamLVLUP runs server-side: ASF farms via SteamKit2 without launching the
-  games. Extension becomes the dispatcher: panel → background SW → `POST
-  http://localhost:1242/Api/Command` with `{Command: "play <appids>"}`
-  (host_permissions += `http://localhost:1242/*`; contract read from ASF
-  sources, see `src/core/asf.ts`). If ASF is not running yet, step one is
-  installing it (user's bot machine; login stays the user's).
-
-Default build order ships 0+1 first (read-only, useful even with engine A); B
-hooks in behind the same queue UI once ASF exists.
-
-## Phase 3 — feedback loop
-
-- rescan cadence (cheap: pages change only after drops land); diff «было 4 →
-  стало 2»; badge-ready notice (crafting stays manual, burning cards is
-  irreversible); cards-in-inventory via the existing 753 inventory path.
-
-## Risks
-
-- Valve SSR-waved badges once already; if the row classes churn again the
-  fixtures fail loudly in tests, not silently in the panel.
-- Drop accrual is time-based per game (hours–days); no tool beats that, Card
-  Factory included — the UI must show ETA honestly.
-- Farming tooling is ToS-grey; the bot exists by user's earlier decision, this
-  feature only widens it. Engine B keeps the bot's credentials inside ASF, the
-  extension never sees them.
+  `start_playing` — the SSR wave removed the Start Playing control entirely.
+  There is nothing in-page to automate for per-game play.
+- The profile banner is NOT a receipt: while Card Factory farmed the same
+  account, the public profile stayed «Currently Online». Only badge counters
+  move. A «Steam NOT seeing the game» verdict from the banner is false.
+- Card Factory's own 742 frame (captured through our ring while it ran)
+  carries the account's ordinary web sessionid — their «server» only encodes
+  bytes. This is what proved the browser-only path was real.

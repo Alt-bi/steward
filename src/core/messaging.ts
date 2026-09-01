@@ -85,15 +85,6 @@ export interface Protocol {
   "log/note": { req: { kind: string; detail: string }; res: { ok: true } };
   "log/read": { req: { limit?: number }; res: { rows: LogRow[] } };
   /**
-   * One ASF round-trip, run in the worker: a content script cannot reach
-   * http://localhost cross-origin, and a page can't reach our bot at all.
-   * Host permission covers loopback only; remote bots stay a manifest edit.
-   */
-  "asf/exec": {
-    req: { url: string; password: string; command: string };
-    res: { ok: true; value?: string; message?: string | null } | { ok: false; error: string };
-  };
-  /**
    * Drive the chat client's CM socket in a chat tab. The worker finds the
    * tab, the tab's MAIN bridge encodes and sends; play/stop is an
    * appid-boolean list so the same shape carries both.

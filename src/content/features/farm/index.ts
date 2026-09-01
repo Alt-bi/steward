@@ -1,7 +1,8 @@
 import { el } from "../../ui/panel";
 import { send } from "../../../core/messaging";
 import { bridgeCall } from "../../chat-relay";
-import { dropsDelta, scanBadges } from "../../../steam/badges";
+import { dropsDelta, farmableRows, scanBadges, type BadgeRow } from "../../../steam/badges";
+import { isPicked, noneDropped, pickAll, pickNone, togglePick, type Picks } from "../../../core/picks";
 import { FARM_MAX, farmTick } from "./engine";
 import { register, type FeatureContext } from "../registry";
 
@@ -75,19 +76,50 @@ register({
 
     const btnStart = el("button", "stw-btn", "Старт");
     const btnStop = el("button", "stw-btn", "Стоп");
-    const btnRescan = el("button", "stw-btn", "Пересчитать сейчас");
+    const btnRescan = el("button", "stw-btn", "Сканировать");
+    btnRescan.title = "Пройти страницы бейджей: список игр, счётчики и ротация берутся только оттуда";
     const btnClaim = el("button", "stw-btn", "Забрать себе");
     btnClaim.hidden = true;
     const autoBox = el("label", "stw-check");
     const autoInput = el("input");
     autoInput.type = "checkbox";
     autoBox.append(autoInput, document.createTextNode(" фармить все игры с дропами (не только очередь)"));
+    const allBtn = el("button", "stw-btn stw-btn-thin", "все");
+    allBtn.type = "button";
+    const noneBtn = el("button", "stw-btn stw-btn-thin", "снять");
+    noneBtn.type = "button";
+    const btnQueue = el("button", "stw-btn", "Отмеченные → в фабрику");
+    btnQueue.type = "button";
+    btnQueue.title = "Заменить очередь отметками из списка ниже — «Старт» не обязателен, если фабрика уже идёт";
+    const controls = el("div", "stw-controls");
+    controls.append(allBtn, noneBtn, btnQueue);
+    const stats = el("div", "stw-stats");
+    const statsNodes: Record<string, HTMLElement> = {};
+    for (const [key, label] of [
+      ["games", "игр с дропами", ""],
+      ["drops", "дропадось", ""],
+      ["badges", "бейджей прочитано", ""],
+    ] as const) {
+      const box = el("div", "stw-stat");
+      const n = el("div", "stw-stat-n", "—");
+      box.append(n, el("div", "stw-stat-l", label));
+      statsNodes[key] = n;
+      stats.appendChild(box);
+    }
+    const rowsWrap = el("div", "stw-rows");
+    /** The last scan — the checkbox list and «в фабрику» live on it. */
+    let scanRows: BadgeRow[] = [];
+    const picked: Picks = noneDropped();
+
     const info = el("div", "stw-farm-info");
     const listWrap = el("div", "stw-farm-list");
     const logWrap = el("div", "stw-farm-log");
 
     section.body.append(
       el("p", "stw-hint", `Фабрика держит в чате до ${FARM_MAX} игр: выбил все дропы — игра снята, из очереди поставлена следующая. Ориентир — счётчики «осталось дропов» на /my/badges, они пересканируются сами.`),
+      stats,
+      controls,
+      rowsWrap,
       info,
       listWrap,
       autoBox,
@@ -103,8 +135,12 @@ register({
     let lastCounts = new Map<number, number | null>();
 
     // The page seeded by «Фабрика» on /badges arrives as #stw-farm — pull the
-    // section forward so the first thing the user sees is the machine.
+    // section forward so the first thing the user sees is the machine, and on
+    // any later hash-navigation into this tab as well.
     if (location.hash === "#stw-farm") section.show();
+    window.addEventListener("hashchange", () => {
+      if (location.hash === "#stw-farm") section.show();
+    });
 
     function fmtTime(ms: number): string {
       return new Date(ms).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
@@ -125,7 +161,7 @@ register({
               ? `Пауза: ${state.playing.length} игр заявлено, ротация стоит`
               : state.queue.length || state.auto
                 ? "Фабрика готова — «Старт»"
-                : "Очередь пуста: отметь игры на /my/badges → «Фабрика», или включи авто-режим",
+                : "Очередь пуста: «Сканировать» → отметь игры → «Отмеченные → в фабрику», или включи авто-режим",
         leaderBlocked ? "warn" : state.running ? "work" : ""
       );
 
@@ -160,6 +196,24 @@ register({
       }
     }
 
+    function renderRows(): void {
+      rowsWrap.textContent = "";
+      for (const row of scanRows) {
+        const id = String(row.appid);
+        const line = el("div", "stw-row");
+        const name = el("label", "stw-name");
+        const check = document.createElement("input");
+        check.type = "checkbox";
+        check.className = "stw-check";
+        check.checked = isPicked(id, picked);
+        check.addEventListener("change", () => togglePick(id, picked));
+        name.append(check, document.createTextNode(` ${row.name}`));
+        name.title = `appid ${row.appid}`;
+        line.append(name, el("span", "stw-our", `${row.dropsRemaining ?? 0} др.`));
+        rowsWrap.appendChild(line);
+      }
+    }
+
     async function leaderBlocked(state: FarmState): Promise<boolean> {
       return state.leader !== instanceId && Date.now() - state.leaderAt < LEADER_STALE_MS;
     }
@@ -181,13 +235,20 @@ register({
       await bridgeCall("cm-play/stop", { entries: [] });
     }
 
-    async function tick(): Promise<void> {
+    async function tick(manual = false): Promise<void> {
       if (busy) return;
       const state0 = await readFarm();
-      if (!state0.running || (await leaderBlocked(state0))) return;
+      // A manual scan is always allowed — it is how the list gets built on a
+      // stopped factory. The rotation half below only runs while it is on.
+      if (!manual && (!state0.running || (await leaderBlocked(state0)))) return;
       busy = true;
       try {
         const scan = await scanBadges({ maxPages: 20 });
+        scanRows = farmableRows(scan).sort((a, b) => (b.dropsRemaining ?? 0) - (a.dropsRemaining ?? 0));
+        statsNodes.games!.textContent = String(scanRows.length);
+        statsNodes.drops!.textContent = String(scanRows.reduce((n, r) => n + (r.dropsRemaining ?? 0), 0));
+        statsNodes.badges!.textContent = String(scan.rows.length);
+        renderRows();
         const byAppid = new Map<number, string>();
         const counts = new Map<number, number | null>();
         for (const r of scan.rows) {
@@ -199,6 +260,16 @@ register({
         lastCounts = counts;
 
         const state = await readFarm();
+        if (!state.running) {
+          setStatus(
+            scanRows.length
+              ? `Посчитано: ${scanRows.length} игр должны карточек. Отмечай и «Отмеченные → в фабрику» → «Старт».`
+              : "Дропов не осталось — можно крафтить.",
+            "ok"
+          );
+          busy = false;
+          return;
+        }
         const next = farmTick({
           rows: scan.rows,
           scanComplete: scan.complete,
@@ -241,6 +312,7 @@ register({
         }
         const fresh = await readFarm();
         render(fresh, false);
+        renderRows();
       } catch (err) {
         const state = await readFarm();
         await writeFarm({
@@ -282,7 +354,30 @@ register({
     });
 
     btnRescan.addEventListener("click", () => {
-      void tick();
+      void tick(true);
+    });
+
+    allBtn.addEventListener("click", () => {
+      pickAll(scanRows.map((r) => String(r.appid)), picked);
+      renderRows();
+    });
+
+    noneBtn.addEventListener("click", () => {
+      pickNone(scanRows.map((r) => String(r.appid)), picked);
+      renderRows();
+    });
+
+    btnQueue.addEventListener("click", () => {
+      void (async () => {
+        const chosen = scanRows.filter((r) => isPicked(String(r.appid), picked)).map((r) => r.appid);
+        if (!chosen.length) {
+          setStatus("Отметь игры в списке (или жми «все»)", "warn");
+          return;
+        }
+        const state = await writeFarm({ queue: chosen });
+        setStatus(`Очередь: ${chosen.length} игр — ротируем по отметкам`, "ok");
+        render(state, await leaderBlocked(state));
+      })();
     });
 
     btnClaim.addEventListener("click", () => {

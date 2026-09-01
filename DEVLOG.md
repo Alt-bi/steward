@@ -1141,3 +1141,36 @@ self-driving" and "one tab, not two".
 - Cross-tab safety: the farm state lives in storage.local with a leader
   heartbeat (stale > 4 min -> another chat tab may take over), so opening
   a second /chat cannot double-farm the same account.
+
+
+## 2.30.1 — the factory moves into the chat, badges keeps one button
+
+The user's complaint was exactly right: `#stw-farm` was a dead hash — the
+farm tab shipped on /chat, but nothing routed the user to it, and the badges
+page still carried the whole old UI (scan, mode select, ASF box, launch).
+Two windows, two half-interfaces. Now there is one.
+
+- **/chat · «Фабрика карточек» is the whole machine.** It grew the old cards
+  tab's scan UI: badge scan (stats + checkbox list from `farmableRows`),
+  «все/снять», «Отмеченные → в фабрику» (replace the queue from checks —
+  works while running, the rotation engine folds the new bench on the next
+  tick), «Сканировать» with `tick(manual)` semantics (a manual scan lists
+  even on a stopped factory; rotation decisions only run while running).
+  The section opens itself on `#stw-farm`, including hashchange in an
+  already-open chat tab.
+- **/my/badges keeps exactly one button** — «Открыть фабрику карточек». It
+  seeds the queue from the picked rows via `farm/open` (empty list allowed:
+  just open the factory), so the badges page is a doorway, not a control room.
+  Feature `cards` shrinks to that; engine pickers, ASF box, snap/replay — all
+  gone from it. Popup button deep-links `#stw-farm` too.
+- **ASF is deleted.** Not hidden — deleted: `core/asf.ts`, `test/asf.test.ts`,
+  `asf/exec` handler and protocol, manifest localhost:1242 host permissions,
+  env scaffolding. The holder CT was destroyed on neuro (205 purged, DNAT
+  gone) and the chat client is proven — an engine with no engine behind it is
+  UI noise. `docs/cards-factory.md` rewritten to describe the shipped shape
+  and record why (golden frame = ordinary web session; banner is not a
+  receipt; badge counters are the only oracle).
+
+Canonical: 684/684, build clean. The one honest limit unchanged: the claim
+lives in the chat tab — close it and Steam drops the games. The factory says
+so on its stop button title, not in a footnote.

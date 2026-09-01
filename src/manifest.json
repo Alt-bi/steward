@@ -26,9 +26,7 @@
     "tabs"
   ],
   "host_permissions": [
-    "https://steamcommunity.com/*",
-    "http://localhost:1242/*",
-    "http://127.0.0.1:1242/*"
+    "https://steamcommunity.com/*"
   ],
   "content_scripts": [
     {

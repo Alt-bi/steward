@@ -19,16 +19,6 @@ let acquireOverride: ((kind: NetKind) => Slot) | null = null;
 
 export const calls: string[] = [];
 export const reports: { kind: NetKind; outcome: string; detail?: string }[] = [];
-/** Commands the panel tried to hand the bot, in order. */
-export const asfCalls: string[] = [];
-
-type AsfHandler = (p: Protocol["asf/exec"]["req"]) => Protocol["asf/exec"]["res"];
-let asfReply: AsfHandler | null = null;
-
-/** Swaps the fake bot; pass null to return the default "OK". */
-export function setAsf(handler: AsfHandler | null): void {
-  asfReply = handler;
-}
 
 const sessionStore: Record<string, unknown> = {};
 let localStore: Record<string, unknown> = {};
@@ -82,8 +72,6 @@ export function setLocalSettings(values: Record<string, unknown>): void {
 export async function resetEnv(): Promise<void> {
   calls.length = 0;
   reports.length = 0;
-  asfCalls.length = 0;
-  asfReply = null;
   postedToPage.length = 0;
   priceCache.clear();
   namingStore.clear();
@@ -150,11 +138,6 @@ async function dispatch(message: Envelope): Promise<unknown> {
       const { keys } = message.payload as Protocol["naming/drop"]["req"];
       for (const key of keys) namingStore.delete(key);
       return { ok: true };
-    }
-    case "asf/exec": {
-      const p = message.payload as Protocol["asf/exec"]["req"];
-      asfCalls.push(p.command);
-      return asfReply ? asfReply(p) : { ok: true, value: "OK" };
     }
     case "log/note":
       return { ok: true };

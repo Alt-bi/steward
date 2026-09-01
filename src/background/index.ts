@@ -66,43 +66,6 @@ const handlers: Handlers = {
 
   "log/read": ({ limit }) => ({ rows: log.slice(-(limit ?? 60)) }),
 
-  /**
-   * The ASF round-trip runs HERE, in the worker: the badges page has no CORS
-   * dealings with a local bot, and ASF answers no preflight anyway. Loopback
-   * only per manifest; the password rides the query per ASF's middleware and
-   * never touches storage beyond this call.
-   */
-  "asf/exec": async ({ url, password, command }) => {
-    const endpoint = `${url.replace(/\/+$/, "")}/Api/Command${password ? `?password=${encodeURIComponent(password)}` : ""}`;
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 15000);
-    try {
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ Command: command }),
-        signal: ac.signal,
-      });
-      const text = await res.text();
-      let body: { Success?: boolean; Message?: string | null; Result?: string } = {};
-      try {
-        body = text ? JSON.parse(text) : {};
-      } catch {
-        return { ok: false, error: `ASF ответил не-JSON (${res.status})` };
-      }
-      if (res.status === 401) return { ok: false, error: "ASF требует IPC-пароль" };
-      if (res.status === 403) return { ok: false, error: "403: ASF пустит только loopback или с паролем" };
-      if (body.Success === false) return { ok: false, error: body.Message || `HTTP ${res.status}` };
-      if (!res.ok && body.Success === undefined) return { ok: false, error: `HTTP ${res.status}` };
-      note("asf", `${command} ok`);
-      return { ok: true, value: body.Result, message: body.Message };
-    } catch (err) {
-      const why = err instanceof Error && err.name === "AbortError" ? "таймаут" : String(err);
-      return { ok: false, error: `ASF не отвечает (${why})` };
-    } finally {
-      clearTimeout(timer);
-    }
-  },
   "cm/play": async (req) => {
     // The chat tab's MAIN bridge encodes and pushes into the chat's own
     // CM websocket; we only route. No tab, no trick — the chat must be open.
@@ -142,14 +105,14 @@ const handlers: Handlers = {
     return { ok: true };
   },
   "farm/open": async (req) => {
-    // Seed the queue, then bring a chat tab up on the farm hash. The farm
-    // page reads stwFarm from storage — the badges tab never talks to the
-    // chat socket itself.
+    // Bring a chat tab up on the farm hash; an empty appids list means "just
+    // open it" (the badges page is only an entry now), a non-empty one seeds
+    // the queue for the farm page to pick up from storage.
     const prev = await chrome.storage.local.get("stwFarm");
     const farm = (prev.stwFarm || {}) as Record<string, unknown>;
-    await chrome.storage.local.set({
-      stwFarm: { ...farm, queue: req.appids.slice(0, 500), updatedAt: Date.now() },
-    });
+    const next = { ...farm, updatedAt: Date.now() } as Record<string, unknown>;
+    if (req.appids.length) next.queue = req.appids.slice(0, 500);
+    await chrome.storage.local.set({ stwFarm: next });
     const tabs = await chrome.tabs.query({ url: CHAT_TAB_PATTERNS });
     const farmUrl = "https://steamcommunity.com/chat/#stw-farm";
     const first = tabs.find((t) => t.id !== undefined);

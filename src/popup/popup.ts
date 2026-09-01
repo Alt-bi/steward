@@ -29,7 +29,7 @@ openMarket.addEventListener("click", () => {
 
 const openFarm = byId<HTMLButtonElement>("open-farm");
 openFarm.addEventListener("click", () => {
-  void chrome.tabs.create({ url: "https://steamcommunity.com/chat/" });
+  void chrome.tabs.create({ url: "https://steamcommunity.com/chat/#stw-farm" });
 });
 
 function fill(settings: Settings): void {

@@ -21,7 +21,11 @@ import { register, type FeatureContext } from "../registry";
 const FARM_KEY = "stwFarm";
 const SCAN_MS = 5 * 60 * 1000; // badge pages are cheap but not free
 const HEART_MS = 10 * 1000;
-const LEADER_STALE_MS = 45 * 1000;
+// A lease is dead after two missed heartbeats plus slack. The watchdog below
+// re-checks every WATCHDOG_MS, so a dead tab (update, Edge sleep, close)
+// frees the farm on its own — nobody has to chase ghosts across tabs.
+const LEADER_STALE_MS = 30 * 1000;
+const WATCHDOG_MS = 5 * 1000;
 const LOG_CAP = 40;
 
 interface FarmState {
@@ -148,13 +152,14 @@ register({
 
     function render(state: FarmState, leaderBlocked: boolean): void {
       btnStart.disabled = busy || leaderBlocked || state.running;
-      btnStop.disabled = leaderBlocked || !state.running;
+      // Stop works from any tab — a ghost lease must never lock the off switch.
+      btnStop.disabled = !state.running;
       btnRescan.disabled = busy || leaderBlocked;
       autoInput.checked = state.auto;
       btnClaim.hidden = !leaderBlocked;
       setStatus(
         leaderBlocked
-          ? "Фабрика уже крутится в другой вкладке чата — закрой её или забери себе"
+          ? "Фабрика ведёт другая вкладка чата. Это пройдёт само: живая вкладка заявляет о себе каждые 10 секунд, мёртвая освобождает фабрику в течение ~30. Хочешь сейчас — «Забрать себе»."
           : state.running
             ? `Фабрика идёт: в игре ${state.playing.length}, в очереди ${state.queue.length} · скан каждые ${Math.round(SCAN_MS / 60000)} мин`
             : state.playing.length
@@ -331,6 +336,40 @@ register({
       }, SCAN_MS);
     }
 
+    /** Take the lease (with a log line) and run — used by watchdog and «Забрать себе». */
+    async function adoptAndRun(state: FarmState, why: string): Promise<void> {
+      await writeFarm({
+        leader: instanceId,
+        leaderAt: Date.now(),
+        log: pushLog(state, why),
+      });
+      armLoop();
+      render(await readFarm(), false);
+      void tick();
+    }
+
+    /**
+     * Should this tab own the lease right now? Running, and either we lead or
+     * the previous leader stopped heartbeating (closed tab, F5, an extension
+     * update, Edge sleep — a live tab claims itself every 10 s).
+     */
+    async function adoptIfOurs(): Promise<boolean> {
+      const state = await readFarm();
+      if (!state.running) return false;
+      if (state.leader === instanceId) {
+        if (timer === null) armLoop();
+        render(state, false);
+        return true;
+      }
+      if (Date.now() - state.leaderAt < LEADER_STALE_MS) return false;
+      // Two follower tabs can spot a dead lease on the same watchdog tick —
+      // re-read first so only the one that still sees it stale adopts.
+      if ((await readFarm()).leaderAt === state.leaderAt) {
+        await adoptAndRun(state, "подхватили фабрику — прежняя вкладка пропала");
+      }
+      return true;
+    }
+
     btnStart.addEventListener("click", () => {
       void (async () => {
         await writeFarm({ running: true, leader: instanceId, leaderAt: Date.now() });
@@ -341,7 +380,13 @@ register({
 
     btnStop.addEventListener("click", () => {
       void (async () => {
-        await writeFarm({ running: false, playing: [] });
+        const state = await readFarm();
+        // A stop only clears the lease this tab actually holds; stopping from
+        // a follower tab pauses the farm but leaves the leader to re-pick it
+        // up — that tab's UI shows "остановлено", the lease lives or dies with
+        // its owner.
+        const ours = state.leader === instanceId;
+        await writeFarm(ours ? { running: false, playing: [], leader: "", leaderAt: 0 } : { running: false, playing: [] });
         if (timer !== null) window.clearInterval(timer);
         timer = null;
         try {
@@ -382,8 +427,8 @@ register({
 
     btnClaim.addEventListener("click", () => {
       void (async () => {
-        await writeFarm({ leader: instanceId, leaderAt: Date.now() });
-        render(await readFarm(), false);
+        const state = await readFarm();
+        await adoptAndRun(state, "фабрика забрана этой вкладкой по кнопке");
       })();
     });
 
@@ -402,13 +447,38 @@ register({
       })();
     }, HEART_MS);
 
+    // Self-healing: every WATCHDOG_MS the tab asks itself whether the farm
+    // should be running here. If the lease is ours (or the previous owner went
+    // silent — closed tab, F5, extension update, Edge sleep), this tab adopts
+    // and rotates on its own. The user should never have to press «Забрать
+    // себе»: the button stays only as a manual override for a live second tab.
+    // Hidden tabs deliberately do not steal the lease, so a throttled
+    // background tab cannot start a bidding war with the tab on screen.
+    window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      void adoptIfOurs();
+    }, WATCHDOG_MS);
+
+    // Coming back to a backgrounded farm tab re-checks the lease immediately.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") void adoptIfOurs();
+    });
+
     // Re-render on storage writes (e.g. «Фабрика» seeded the queue from
-    // /badges while this tab sat open).
+    // /badges while this tab sat open). A lease heartbeat is a storage write
+    // every 10 s — re-scanning 20 badge pages per heartbeat is a Steam
+    // rate-limit bomb, so rotation only re-runs when the lease changes hands
+    // or the queue is rewritten, not on every leaderAt bump.
+    let lastSeen: { leader: string; queue: string; running: string } = { leader: "", queue: "", running: "" };
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local" || !(FARM_KEY in changes)) return;
       void (async () => {
         const state = await readFarm();
+        const mark = { leader: state.leader, queue: state.queue.join(","), running: String(state.running) };
+        const matters = mark.leader !== lastSeen.leader || mark.queue !== lastSeen.queue || mark.running !== lastSeen.running;
+        lastSeen = mark;
         render(state, await leaderBlocked(state));
+        if (!matters) return;
         if (state.running && state.leader === instanceId && timer === null) armLoop();
         if (state.running && state.leader === instanceId) void tick();
       })();

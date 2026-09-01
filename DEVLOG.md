@@ -1185,3 +1185,17 @@ script whose chrome.* throws "Extension context invalidated" - the new UI
 never mounted until F5. Fix: register content.css on /chat, reload all steam-
 community tabs from onInstalled, and have boot() detect a dead context and
 print a plain "press F5" notice instead of scattering uncaught rejections.
+
+## 2.30.3 - the farm heals its own lease
+
+A dead leader tab (update, Edge sleep, close) could keep the farm locked
+behind "another chat tab runs it" with a dead "take over" button.
+
+- watchdog: every visible farm tab adopts the lease ~30 s after the
+  previous leader stops heartbeating, logs "we took over", and resumes;
+  re-reads storage first so two followers cannot both adopt
+- "take over" actually starts rotation now (it only wrote a field before)
+- Stop works from any tab; a ghost lease can never lock the off switch
+- heartbeat storm fix: storage.onChanged no longer triggers a 20-page badge
+  scan per 10 s heartbeat (that rate-limited Steam and ate the first scan)
+- popup "card factory" reuses the open chat tab instead of piling duplicates

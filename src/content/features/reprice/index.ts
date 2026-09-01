@@ -321,7 +321,13 @@ async function mount(ctx: FeatureContext): Promise<void> {
     }
     const secs = Math.ceil(left / 1000);
     const note = pauseReason === "cooldown" ? `лимит Steam ${secs}с` : `бюджет запросов ${secs}с`;
-    section.setStatus(`${phase} · ${note}`, pauseReason === "cooldown" ? "warn" : phaseKind);
+    /**
+     * Edge freezes background tabs, and a frozen pause never wakes up. A scan
+     * that looks hung for an hour is usually a sleeping tab, not a hung scan —
+     * the status has to say so, because the alternative reading is "broken".
+     */
+    const asleep = document.hidden ? " · вкладка уснула, верни её на экран" : "";
+    section.setStatus(`${phase} · ${note}${asleep}`, pauseReason === "cooldown" ? "warn" : phaseKind);
   }
 
   function status(text: string, kind: StatusKind = ""): void {

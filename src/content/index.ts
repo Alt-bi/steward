@@ -16,7 +16,34 @@ import "./features/cards";
 import "./features/farm";
 import { mountChatRelay } from "./chat-relay";
 
+function showStaleNotice(): void {
+  if (document.getElementById("stw-stale")) return;
+  const box = document.createElement("div");
+  box.id = "stw-stale";
+  box.textContent = "Steward обновился — обнови эту страницу (F5), чтобы вернулся интерфейс.";
+  box.style.cssText =
+    "position:fixed;top:8px;right:8px;z-index:2147483001;color:#fff;padding:10px 14px;border-radius:8px;font:13px/1.4 sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.5)";
+  box.style.background = "#1b2832";
+  document.documentElement.appendChild(box);
+}
+
+async function chromeRuntimeAlive(): Promise<boolean> {
+  try {
+    // getManifest throws once the context is invalidated.
+    return Boolean(chrome.runtime?.id && chrome.runtime.getManifest());
+  } catch {
+    return false;
+  }
+}
+
 async function boot(): Promise<void> {
+  // An orphaned script (extension was updated under this tab) has a dead
+  // chrome.* context - nothing we do here can work, so say so instead of
+  // scattering uncaught rejections across the console.
+  if (!(await chromeRuntimeAlive())) {
+    showStaleNotice();
+    return;
+  }
   mountChatRelay();
   if (panelExists()) return;
 

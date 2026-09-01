@@ -1174,3 +1174,14 @@ Two windows, two half-interfaces. Now there is one.
 Canonical: 684/684, build clean. The one honest limit unchanged: the claim
 lives in the chat tab — close it and Steam drops the games. The factory says
 so on its stop button title, not in a footnote.
+
+## 2.30.2 - the chat panel existed but was invisible and orphaned
+
+Two bugs, one symptom ("no interface on #stw-farm"): the /chat content-script
+block never got css:["content.css"] (only the badges block had it), so the
+panel mounted unstyled and hid under the full-screen chat; and after an
+extension update every open Steam tab kept running the ORPHANED old content
+script whose chrome.* throws "Extension context invalidated" - the new UI
+never mounted until F5. Fix: register content.css on /chat, reload all steam-
+community tabs from onInstalled, and have boot() detect a dead context and
+print a plain "press F5" notice instead of scattering uncaught rejections.

@@ -136,6 +136,14 @@ serve(handlers);
 
 chrome.runtime.onInstalled.addListener(() => {
   void cache.sweep();
+  // Content scripts orphaned by an extension update are dead code that
+  // throws "Extension context invalidated" on every call - and the user
+  // never sees the new UI until F5. Steam pages hold no state worth losing;
+  // reload them ourselves.
+  void chrome.tabs
+    .query({ url: "https://steamcommunity.com/*" })
+    .then((tabs) => tabs.forEach((tab) => tab.id != null && chrome.tabs.reload(tab.id).catch(() => {})))
+    .catch(() => {});
 });
 
 chrome.runtime.onStartup.addListener(() => {

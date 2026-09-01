@@ -1209,3 +1209,25 @@ behind "another chat tab runs it" with a dead "take over" button.
   «Фабрика идёт: в игре 0, в очереди 10»; cm/play errors also go to the log
 - proof on the live chat profile: 2.30.4 scans (401 badges), auto-picks 8
   games, plays all 8, queue drains to 0
+
+## 2.30.5 - the forever-ban had no way back
+
+Read the user's own storage journal (copied leveldb out of the locked Edge
+profile) instead of guessing. Every tick of his farm had run clean - no
+errors, no lease fights, socket alive. The state simply said `running: true,
+playing: [], queue: [], dropped: [10 appids]`. His whole drop list sat in the
+ban list: the `x` on a queued row removes a game *forever* - the engine skips
+`dropped` games even when a fresh scan says they still owe cards - and there
+was no undo. The honest status said "spinning, chat sets nothing" because the
+scan DID see owed games and the engine silently refused them.
+
+Fix:
+- "вернуть все (N)" button clears the ban list when the scan still sees owed
+  drops; the next tick re-matches them into the claim.
+- Status now names the starvation: "spinning in vain: the x-list ate all N
+  games with drops" instead of the generic shrug.
+- `x` tooltip says where the game went.
+
+Lesson: "no errors" does not mean "has work". A running farm with an empty
+claim must state WHY from the scan, in the status line, not in a log nobody
+opens.

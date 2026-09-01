@@ -3,7 +3,7 @@ import { send } from "../../../core/messaging";
 import { bridgeCall } from "../../chat-relay";
 import { dropsDelta, farmableRows, scanBadges, type BadgeRow } from "../../../steam/badges";
 import { isPicked, noneDropped, pickAll, pickNone, togglePick, type Picks } from "../../../core/picks";
-import { FARM_MAX, farmTick } from "./engine";
+import { FARM_MAX, farmTick, farmableOrder } from "./engine";
 import { register, type FeatureContext } from "../registry";
 
 /**
@@ -41,6 +41,8 @@ interface FarmState {
   /** Why the last rotation tick failed — the status line must show it. */
   lastErr?: string;
   lastErrAt?: number;
+  /** Why a running farm plays nothing (e.g. the ban list ate every game). */
+  starve?: string;
 }
 
 const EMPTY: FarmState = {
@@ -87,6 +89,10 @@ register({
     btnRescan.title = "Пройти страницы бейджей: список игр, счётчики и ротация берутся только оттуда";
     const btnClaim = el("button", "stw-btn", "Забрать себе");
     btnClaim.hidden = true;
+    const btnRestore = el("button", "stw-btn stw-btn-thin", "вернуть все");
+    btnRestore.type = "button";
+    btnRestore.hidden = true;
+    btnRestore.title = "Кнопка × в очереди убирает игру из фармы навсегда (она и её будущие дропы игнорируются). Здесь снятые возвращаются — дропы снова фармятся.";
     const autoBox = el("label", "stw-check");
     const autoInput = el("input");
     autoInput.type = "checkbox";
@@ -99,7 +105,7 @@ register({
     btnQueue.type = "button";
     btnQueue.title = "Заменить очередь отметками из списка ниже — «Старт» не обязателен, если фабрика уже идёт";
     const controls = el("div", "stw-controls");
-    controls.append(allBtn, noneBtn, btnQueue);
+    controls.append(allBtn, noneBtn, btnQueue, btnRestore);
     const stats = el("div", "stw-stats");
     const statsNodes: Record<string, HTMLElement> = {};
     for (const [key, label] of [
@@ -160,12 +166,16 @@ register({
       btnRescan.disabled = busy || leaderBlocked;
       autoInput.checked = state.auto;
       btnClaim.hidden = !leaderBlocked;
+      btnRestore.hidden = state.dropped.length === 0;
+      btnRestore.textContent = `вернуть все (${state.dropped.length})`;
       setStatus(
         leaderBlocked
           ? "Фабрика ведёт другая вкладка чата. Это пройдёт само: живая вкладка заявляет о себе каждые 10 секунд, мёртвая освобождает фабрику в течение ~30. Хочешь сейчас — «Забрать себе»."
           : state.running
             ? state.playing.length === 0
-              ? `Крутится, но чат не ставит ни одной игры${state.lastErr ? `: ${state.lastErr}` : ""} — журнал ниже`
+              ? state.starve
+                ? `Крутится впустую: ${state.starve}`
+                : `Крутится, но чат не ставит ни одной игры${state.lastErr ? `: ${state.lastErr}` : ""} — журнал ниже`
               : `Фабрика идёт: в игре ${state.playing.length}, в очереди ${state.queue.length} · скан каждые ${Math.round(SCAN_MS / 60000)} мин`
             : state.playing.length
               ? `Пауза: ${state.playing.length} игр заявлено, ротация стоит`
@@ -175,9 +185,11 @@ register({
         leaderBlocked
           ? "warn"
           : state.running
-            ? state.playing.length || !state.lastErr
+            ? state.playing.length
               ? "work"
-              : "err"
+              : state.lastErr || state.starve
+                ? "err"
+                : "work"
             : ""
       );
 
@@ -199,7 +211,7 @@ register({
         row.append(el("span", "", `${state.names[String(a)] || a}`));
         const drop = el("button", "stw-mini", "×");
         drop.type = "button";
-        drop.title = "Убрать из фармы навсегда";
+        drop.title = "Убрать из фармы (список «×») — вернуть через «вернуть все»";
         drop.addEventListener("click", () => void removeGame(a));
         row.append(drop);
         listWrap.append(row);
@@ -238,8 +250,13 @@ register({
       const state = await readFarm();
       state.queue = state.queue.filter((a) => a !== appid);
       if (!state.dropped.includes(appid)) state.dropped.push(appid);
-      await writeFarm({ queue: state.queue, dropped: state.dropped });
-      render(state, await leaderBlocked(state));
+      const name = state.names[String(appid)] || String(appid);
+      await writeFarm({
+        queue: state.queue,
+        dropped: state.dropped,
+        log: pushLog(state, `снята из фармы: ${name} — «вернуть все» вернёт её, если дропы ещё есть`),
+      });
+      render(await readFarm(), await leaderBlocked(state));
     }
 
     async function swapIn(playing: number[]): Promise<void> {
@@ -305,6 +322,18 @@ register({
         }
 
         const changed = next.playing.join(",") !== state.playing.join(",");
+
+        // A running farm with nothing to play is never a mystery: if the scan
+        // sees games that owe drops, they were removed by the forever-ban list
+        // — say so and show the way back.
+        let starve = "";
+        if (next.playing.length === 0) {
+          const owed = farmableOrder(scan.rows);
+          const banned = owed.filter((a) => state.dropped.includes(a));
+          if (owed.length && banned.length === owed.length) {
+            starve = `список «×» съел все ${owed.length} игр с дропами — «вернуть все»`;
+          }
+        }
         if (changed && next.playing.length >= 0) {
           if (next.playing.length === 0 && state.playing.length > 0) await stopClaim();
           else await swapIn(next.playing);
@@ -317,6 +346,7 @@ register({
           leaderAt: Date.now(),
           lastErr: "",
           lastErrAt: 0,
+          starve,
           names: { ...state.names, ...Object.fromEntries(byAppid) },
           log,
         });
@@ -444,6 +474,20 @@ register({
       void (async () => {
         const state = await readFarm();
         await adoptAndRun(state, "фабрика забрана этой вкладкой по кнопке");
+      })();
+    });
+
+    // «×» in the queue line was a forever-ban (the game and every future drop
+    // of it were ignored by the farm) with no way back. This is the way back:
+    // clear the ban list, re-scan, and the running farm picks those games up.
+    btnRestore.addEventListener("click", () => {
+      void (async () => {
+        const state = await readFarm();
+        const n = state.dropped.length;
+        if (!n) return;
+        await writeFarm({ dropped: [], log: pushLog(state, `возвращено в фабрику: ${n} снятых игр`) });
+        render(await readFarm(), await leaderBlocked(state));
+        void tick(true);
       })();
     });
 

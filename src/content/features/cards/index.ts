@@ -74,6 +74,27 @@ async function mount(ctx: FeatureContext): Promise<void> {
     "По одной игре через steam://run: клиент спросит подтверждение, играет, карточка капает с наигранным временем.\n" +
     "В режиме ASF-бота ставит игры в поток боту — до 32 сразу.";
 
+  const factoryBtn = el("button", "stw-btn", "Фабрика");
+  factoryBtn.type = "button";
+  factoryBtn.title =
+    "Перенести очередь фармы на страницу чата: открывает /chat со встроенной фабрикой — одна вкладка вместо двух";
+  factoryBtn.addEventListener("click", () => {
+    const chosen = appIds.filter((id) => isPicked(id, dropped)).map(Number);
+    if (!chosen.length) {
+      status("Отметь игры, которые отправляем на фабрику", "warn");
+      return;
+    }
+    void (async () => {
+      const r = await send("farm/open", { appids: chosen });
+      status(
+        r.ok
+          ? `Очередь из ${chosen.length} игр передана — фабрика открывается во вкладке чата`
+          : "Не удалось открыть фабрику в чате",
+        r.ok ? "ok" : "err"
+      );
+    })();
+  });
+
   const stopBtn = el("button", "stw-btn stw-btn-thin", "стоп");
   const snapBtn = el("button", "stw-btn stw-btn-thin", "снимок 742");
   const replayBtn = el("button", "stw-btn stw-btn-thin", "реплей эталона");
@@ -104,7 +125,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   asfBox.append(urlInput, passInput, botInput, testBtn, saveBtn);
 
   const head = el("div", "stw-controls");
-  head.append(scanBtn, allBtn, noneBtn, modeSelect, launchBtn, stopBtn, snapBtn, replayBtn);
+  head.append(scanBtn, factoryBtn, allBtn, noneBtn, modeSelect, launchBtn, stopBtn, snapBtn, replayBtn);
 
   const stats = el("div", "stw-stats");
   const statNodes: Record<string, HTMLElement> = {};

@@ -23,6 +23,8 @@ interface RelayPayload {
   verify?: boolean;
   /** Golden 742 bytes to inject verbatim (diagnostic replay). */
   replay?: number[];
+  /** Replace the playing set without stopping the keep-alive timer. */
+  swap?: boolean;
   entries: { appid: number; playing: boolean; secure: boolean; offline: boolean }[];
 }
 
@@ -31,8 +33,9 @@ const isChat = () => location.pathname.startsWith("/chat") || location.pathname.
 /** This relay's build — the worker refuses bridges from an older orphaned script. */
 const relayVersion = () => chrome.runtime.getManifest().version as string;
 
-/** Ask the MAIN bridge and wait for its -reply. */
-function bridgeCall(type: string, extra: Record<string, unknown>): Promise<{ ok?: boolean; note?: string }> {
+/** Ask the MAIN bridge and wait for its -reply. Exported for the in-page
+ * card farm — same page, same socket, no need to route through the worker. */
+export function bridgeCall(type: string, extra: Record<string, unknown>): Promise<{ ok?: boolean; note?: string }> {
   return new Promise((resolve) => {
     let settled = false;
     const onMsg = (event: MessageEvent) => {
@@ -74,6 +77,10 @@ export function mountChatRelay(): void {
       }
       if (payload.stop) {
         sendResponse(stamp(await bridgeCall("cm-play/stop", {})));
+        return;
+      }
+      if (payload.swap) {
+        sendResponse(stamp(await bridgeCall("cm-play/swap", { entries: payload.entries })));
         return;
       }
       sendResponse(stamp(await bridgeCall("cm-play/start", { entries: payload.entries })));

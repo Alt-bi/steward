@@ -88,6 +88,27 @@ function start(entries: PlayEntry[]): { ok: boolean; note?: string } {
   return { ok: true, note: playing.length + " game(s) claimed" };
 }
 
+/**
+ * Swap the claimed set without restarting the keep-alive timer — the factory
+ * calls this the moment a game is finished. A naive rotation that stops and
+ * starts between drop-outs flashes an empty session past Steam; keep-alive
+ * must flow across every swap, so this path never idles the timer.
+ */
+function setPlaying(entries: PlayEntry[]): { ok: boolean; note?: string } {
+  const ws = cmSocket();
+  const ids = cmIds();
+  if (!ws || !ids) return { ok: false, note: "open the chat (steamcommunity.com/chat) first" };
+  playing = entries.slice(0, 32);
+  ourSend(ws, buildGamesPlayedFrame(playing, ids));
+  if (playing.length === 0 && keepTimer !== null) {
+    window.clearInterval(keepTimer);
+    keepTimer = null;
+  } else if (playing.length > 0 && keepTimer === null) {
+    keepTimer = window.setInterval(keepAlive, KEEPALIVE_MS);
+  }
+  return { ok: true, note: playing.length + " game(s) playing" };
+}
+
 function stop(): { ok: boolean; note?: string } {
   const ws = cmSocket();
   const ids = cmIds();
@@ -195,13 +216,15 @@ window.addEventListener("message", (event: MessageEvent) => {
   const result =
     d.type === "cm-play/start"
       ? start(d.entries || [])
-      : d.type === "cm-play/stop"
-        ? stop()
-        : d.type === "cm-play/replay"
-          ? replayRaw(d.bytes || [])
-          : d.type === "cm-play/verify"
-            ? null // async; handled below
-            : null;
+      : d.type === "cm-play/swap"
+        ? setPlaying(d.entries || [])
+        : d.type === "cm-play/stop"
+          ? stop()
+          : d.type === "cm-play/replay"
+            ? replayRaw(d.bytes || [])
+            : d.type === "cm-play/verify"
+              ? null // async; handled below
+              : null;
   if (d.type === "cm-play/verify") {
     void verify().then((r) => {
       window.postMessage({ source: cmPlayBridgeName + "-reply", type: d.type, steamid: ids?.steamid ?? null, ...r }, "*");

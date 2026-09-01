@@ -38,3 +38,4 @@ import "./ssr.test";
 import "./mylistings.test";
 import "./live-shapes.test";
 import "./registry.test";
+import "./farm.test";

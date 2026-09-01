@@ -657,3 +657,47 @@
   font-variant-numeric: tabular-nums;
 }
 
+
+/* Farm factory page (on /chat): live list of what is farmed and waiting. */
+.stw-farm-legend {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.stw-farm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 13px;
+}
+.stw-farm-idx {
+  width: 26px;
+  color: rgba(255, 255, 255, 0.55);
+  text-align: right;
+}
+.stw-farm-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stw-farm-drops {
+  color: rgba(255, 255, 255, 0.7);
+  white-space: nowrap;
+}
+.stw-farm-row-play {
+  border-left: 3px solid #46c06a;
+  padding-left: 6px;
+  margin-left: -9px;
+}
+.stw-farm-row-done {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.stw-farm-done {
+  font-size: 12px;
+  opacity: 0.8;
+  margin-top: 6px;
+}

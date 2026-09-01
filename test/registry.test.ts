@@ -11,6 +11,7 @@ import "../src/content/features/inventory";
 import "../src/content/features/trade";
 import "../src/content/features/listing";
 import "../src/content/features/cards";
+import "../src/content/features/farm";
 
 function idsFor(href: string): string[] {
   return activeFeatures(new URL(href), DEFAULT_SETTINGS).map((f) => f.id);
@@ -20,7 +21,7 @@ describe("feature routing", () => {
   it("registers every feature exactly once", () => {
     const ids = allFeatures().map((f) => f.id);
     assert.deepEqual([...new Set(ids)].sort(), ids.slice().sort(), "no duplicate registrations");
-    assert.deepEqual(ids.slice().sort(), ["buyorders", "cards", "inventory", "listing", "reprice", "trade"]);
+    assert.deepEqual(ids.slice().sort(), ["buyorders", "cards", "farm", "inventory", "listing", "reprice", "trade"]);
   });
 
   it("puts reprice and buy orders on the market front page", () => {

@@ -1114,3 +1114,30 @@ Now every relay reply is stamped with chrome.runtime.getManifest().version,
 and the worker refuses to route through a relay stamped with a different
 version: "the chat tab is old — refresh it (F5)". The handshake is cheap and
 it makes the upgrade story one instruction instead of a silent failure mode.
+
+## 2.30.0 — the factory lives in the chat, and it rotates itself
+
+Three asks from the user after the first confirmed drop wave: CT 205 was
+already destroyed on request (the browser path proved the holder was never
+needed). The two features shipped here are the answer to "farm must be
+self-driving" and "one tab, not two".
+
+- `features/farm` mounts on /chat itself: the same CM socket that carries
+  the claim is right there, so the page reads badges (worker-side scan),
+  claims directly through its own bridge (`cm-play/swap` rotates the
+  bench without tearing the keepalive), and never needs the badges tab
+  open. Buttons to it: «Фабрика» on the badges tab (seeds the queue with
+  the ticked games via worker `farm/open`, focuses/opens the chat tab) and
+  a button in the popup.
+- The rotation engine is a pure function (`farm/engine.ts`, 11 tests):
+  a game leaves the bench only on evidence — a row saying zero always
+  counts, absence only on a COMPLETE scan (a lost page must never evict a
+  live game); finished games never re-enter; the bench caps at 32 and the
+  queue promotes; foil rows claiming zero cannot evict the normal game.
+  A loop tick scans badges, diffs drop counters against the previous scan,
+  logs every +card with the game name, swaps the claim when the bench
+  changed, and closes the factory only when a complete scan says nothing
+  is owed — an empty bench caused by an outage retries, it does not lie.
+- Cross-tab safety: the farm state lives in storage.local with a leader
+  heartbeat (stale > 4 min -> another chat tab may take over), so opening
+  a second /chat cannot double-farm the same account.

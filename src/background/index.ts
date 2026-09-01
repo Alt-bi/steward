@@ -141,6 +141,22 @@ const handlers: Handlers = {
     await chrome.storage.local.set({ [key]: list });
     return { ok: true };
   },
+  "farm/open": async (req) => {
+    // Seed the queue, then bring a chat tab up on the farm hash. The farm
+    // page reads stwFarm from storage — the badges tab never talks to the
+    // chat socket itself.
+    const prev = await chrome.storage.local.get("stwFarm");
+    const farm = (prev.stwFarm || {}) as Record<string, unknown>;
+    await chrome.storage.local.set({
+      stwFarm: { ...farm, queue: req.appids.slice(0, 500), updatedAt: Date.now() },
+    });
+    const tabs = await chrome.tabs.query({ url: CHAT_TAB_PATTERNS });
+    const farmUrl = "https://steamcommunity.com/chat/#stw-farm";
+    const first = tabs.find((t) => t.id !== undefined);
+    if (first) await chrome.tabs.update(first.id!, { url: farmUrl, active: true });
+    else await chrome.tabs.create({ url: farmUrl });
+    return { ok: true };
+  },
   "cm/golden": async () => {
     const prev = await chrome.storage.local.get("cmCaptured");
     const list = Array.isArray(prev.cmCaptured)

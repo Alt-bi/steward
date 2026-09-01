@@ -27,6 +27,11 @@ openMarket.addEventListener("click", () => {
   void chrome.tabs.create({ url: "https://steamcommunity.com/market/" });
 });
 
+const openFarm = byId<HTMLButtonElement>("open-farm");
+openFarm.addEventListener("click", () => {
+  void chrome.tabs.create({ url: "https://steamcommunity.com/chat/" });
+});
+
 function fill(settings: Settings): void {
   delay.value = String(settings.delayMs);
   undercut.value = String(settings.undercutCents);

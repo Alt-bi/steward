@@ -99,7 +99,14 @@ export interface Protocol {
    * appid-boolean list so the same shape carries both.
    */
   "cm/play": {
-    req: { stop: boolean; verify?: boolean; replay?: number[]; entries: { appid: number; playing: boolean; secure: boolean; offline: boolean }[] };
+    req: {
+      stop: boolean;
+      verify?: boolean;
+      replay?: number[];
+      /** Swap the claimed set without disturbing the keep-alive timer. */
+      swap?: boolean;
+      entries: { appid: number; playing: boolean; secure: boolean; offline: boolean }[];
+    };
     res: { ok: true; sent: boolean; note?: string } | { ok: false; error: string } | { ok: false; sent: true; note?: string };
   };
   /** A MAIN-bridge captured 742 frame (ours or a golden one from another
@@ -110,6 +117,12 @@ export interface Protocol {
   };
   /** What the capture ring holds right now — the tab reads it to offer replay. */
   "cm/golden": { req: Record<string, never>; res: { frames: { bytes: number[]; mine: boolean; at: number }[] } };
+  /** Seed the card-factory queue and bring up the farm view in a chat tab.
+   * The farm itself lives on /chat — it talks to the MAIN bridge directly. */
+  "farm/open": {
+    req: { appids: number[] };
+    res: { ok: true } | { ok: false; error: string };
+  };
 }
 
 

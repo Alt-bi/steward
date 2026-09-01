@@ -13,6 +13,7 @@ import "./features/offers";
 import "./features/trade";
 import "./features/listing";
 import "./features/cards";
+import "./features/farm";
 import { mountChatRelay } from "./chat-relay";
 
 async function boot(): Promise<void> {

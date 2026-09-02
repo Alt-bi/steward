@@ -6,11 +6,11 @@ import { csvDoc, downloadCsv } from "../../../core/csv";
 import { noneDropped, pickAll, pickNone, togglePick, type Picks } from "../../../core/picks";
 import { loadSettings, type Settings } from "../../../core/settings";
 import type { Cents, ItemKeyed, Listing, RepricePlan } from "../../../core/types";
-import { needsConfirmation, removeListing, sellItem } from "../../../steam/actions";
+import { needsConfirmation, removeListing, sellItemWhenReady } from "../../../steam/actions";
 import { scanCompetitors } from "../../../steam/listings";
 import { forgetGroup, knownGroup, learnGroups } from "../../../steam/grouping";
 import { learnGroupForItem } from "../../../steam/search";
-import { fetchMyListings } from "../../../steam/mylistings";
+import { applyAssetRefs, fetchMyListings, listingsOnPage } from "../../../steam/mylistings";
 import { allowSteamTraffic, sleep, SteamError, type WaitReason } from "../../../steam/net";
 import { currencyId, feeConfig, sessionId, waitForPage } from "../../../steam/page-context";
 import { loadHistories } from "../../../steam/history-load";
@@ -452,7 +452,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     rows.replaceChildren();
     if (!state.plans.length) {
       rows.appendChild(
-        el("div", "stw-empty", "Нажми «Сканировать лоты» — возьму все активные лоты аккаунта, не только те, что Steam нарисовал на странице.")
+        el("div", "stw-empty", "Нажми «Сканировать лоты» — посчитаю лоты, которые Steam показал на этой странице. Сколько их — твой выбор на странице.")
       );
       return;
     }
@@ -866,7 +866,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
       : "";
 
     status(
-      `${verdict}${gap}${history}${naming}${ours} Все лоты аккаунта уже в списке — «Сканировать лоты» обновит цены. ${spent}`,
+      `${verdict}${gap}${history}${naming}${ours} Считаю только лоты этой страницы — перелистни и сканируй снова для следующих. ${spent}`,
       todo || unsure ? "warn" : "ok"
     );
   }
@@ -909,29 +909,44 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
     try {
       /**
-       * One read, one path: Steam's own endpoint, paged by Steam's own count.
+       * Only the page Steam is showing. Whatever the account owner chose as the
+       * page size is the scope of this scan; the rest of the account is not read,
+       * not priced, not touched.
        *
-       * There used to be a cheaper first reader — scrape the rows already drawn
-       * on the page, spare the network. It died with the old market: the page
-       * either draws twenty rows out of seven hundred or answers the whole URL
-       * with JSON. Either way the table is a fraction of the account, and a
-       * reprice that quietly covers a twentieth of it is worse than a slow one.
-       * The rows, the asset behind each, and the complete set of our listing
-       * ids all come from the same answer now — and they come complete.
+       * One `mylistings` answer still goes out — not to widen the scope but to
+       * deepen it: it is the only source of the assetid behind each drawn row,
+       * and a lot without it can be taken off the market and not put back. The
+       * answer covers Steam's own first page, so an assetid it could not name
+       * stays empty and the planner refuses that lot out loud.
        */
-      status("Читаю свои лоты…", "work");
-      const mine = await fetchMyListings(0, pacing, (seen, total) => {
-        status(`Читаю свои лоты ${seen} из ${total}…`, "work");
-      });
-      const listings = mine.listings ?? [];
-      for (const id of mine.ids) state.ourIds.add(id);
-      state.ownershipComplete = mine.complete;
+      status("Читаю лоты на странице…", "work");
+      const listings = listingsOnPage();
+      /**
+       * The rows usually carry their asset themselves — Steam prints it in the
+       * cancel button. Only when one is missing does the `mylistings` answer go
+       * out, as a lookup for the row, not a licence to widen the scan.
+       */
+      if (listings.some((l) => !l.assetid)) {
+        try {
+          const mine = await fetchMyListings(0, pacing);
+          applyAssetRefs(listings, mine.refs);
+          for (const id of mine.ids) state.ourIds.add(id);
+          state.ownershipComplete = mine.complete;
+        } catch {
+          /**
+           * A row whose asset we cannot name gets refused by the planner rather
+           * than repriced — it could come off the market and not go back.
+           */
+          state.ownershipComplete = false;
+        }
+      }
+      for (const listing of listings) state.ourIds.add(listing.listingId);
 
       state.listings = listings;
       renderStats();
 
       if (!listings.length) {
-        status("Steam отвечает: активных лотов у аккаунта нет — сканировать нечего.", "err");
+        status("На странице нет выставленных лотов. Выбери на странице «Показывать по …» и сканируй снова.", "warn");
         setBusy(false);
         return;
       }
@@ -1094,7 +1109,18 @@ async function mount(ctx: FeatureContext): Promise<void> {
         await removeListing(plan.listingId, pacing);
         stage = "relisting";
         await sleep(delay);
-        const result = await sellItem(plan, pacing);
+        /**
+         * Asking again is the fix, not a workaround: the hand-back between
+         * remove and sell takes seconds, and the first sellitem often lands
+         * before it. Each try paces itself; the run never waits blind.
+         */
+        const result = await sellItemWhenReady(plan, pacing, {
+          onRetry: (n) =>
+            status(
+              `Переставляю ${i + 1}/${todo.length}: ${plan.name} — предмет ещё возвращается в инвентарь, пробую снова (${n})`,
+              "work"
+            ),
+        });
         plan.result = "ok";
         if (needsConfirmation(result)) {
           plan.resultMessage = "ожидает Steam Guard";
@@ -1297,7 +1323,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     status("Останавливаю…", "warn");
   });
 
-  status("Нажми «Сканировать лоты» — возьму все активные лоты аккаунта.");
+  status("Нажми «Сканировать лоты» — считаю лоты этой страницы.");
   renderRows();
   renderStats();
 }

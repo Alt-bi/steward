@@ -64,7 +64,14 @@ function hoverFromBlob(blob: string): (HoverRef & { listingId: string }) | null 
   return { listingId: m[1], appid: Number(m[2]), contextid: m[3], assetid: m[4] };
 }
 
-/** `hovers` is a blob of JS calls; it is the only place assetid survives some rows. */
+/**
+ * The cancel button names the asset outright — this is the call Steam itself
+ * makes to take a lot down, so the assetid in it is the one Steam trusts. It is
+ * more reliable than a hover blob, which some layouts drop.
+ */
+const CANCEL_RE =
+  /RemoveMarketListing\(\s*'mylisting'\s*,\s*'(\d+)'\s*,\s*(\d+)\s*,\s*'(\d+)'\s*,\s*'(\d+)'/;
+
 export function parseHovers(hovers: string): Record<string, HoverRef> {
   const map: Record<string, HoverRef> = {};
   let m: RegExpExecArray | null;
@@ -77,6 +84,11 @@ export function parseHovers(hovers: string): Record<string, HoverRef> {
   return map;
 }
 
+/** innerHTML without betting on which DOM implementation we are talking to. */
+function innerHtmlOf(node: unknown): string {
+  const html = (node as { innerHTML?: unknown } | null)?.innerHTML;
+  return typeof html === "string" ? html : "";
+}
 const ROW_SELECTOR = '.market_listing_row[id^="mylisting_"], [id^="mylisting_"]';
 const ROW_ID = /^mylisting_(\d+)$/;
 const NAME_LINK_SELECTOR = ".market_listing_item_name_link";
@@ -163,13 +175,18 @@ function parseListingDoc(root: ParentNode | null): Record<string, ParsedRow> {
     const m = href.match(/\/market\/listings\/(\d+)\/([^/?#]+)/);
     const name = (link?.textContent ?? "").trim();
     const hover = hoverFromBlob(row.getAttribute("onmouseover") ?? "");
+    /** The cancel button is the ground truth of which asset this row holds. */
+    const cancel = CANCEL_RE.exec(innerHtmlOf(row) + " " + (row.getAttribute("onclick") ?? ""));
+    const cancelAssetid = cancel?.[4];
+    const cancelAppid = cancel?.[2] ? Number(cancel[2]) : null;
+    const cancelContextid = cancel?.[3];
     const prices = pricesFromListingRow(row);
 
     map[listingId] = {
       listingId,
-      appid: hover?.appid ?? (m?.[1] ? Number(m[1]) : null),
-      contextid: hover?.contextid,
-      assetid: hover?.assetid,
+      appid: cancelAppid ?? hover?.appid ?? (m?.[1] ? Number(m[1]) : null),
+      contextid: cancelContextid ?? hover?.contextid,
+      assetid: cancelAssetid ?? hover?.assetid,
       hash: m?.[2] ? decodeURIComponent(m[2]) : name,
       name,
       buyer: prices.buyer,
@@ -177,6 +194,67 @@ function parseListingDoc(root: ParentNode | null): Record<string, ParsedRow> {
     };
   }
   return map;
+}
+
+/**
+ * Listings Steam has already painted. The page-scoped scan takes exactly these
+ * rows and asks nothing about the rest of the account.
+ */
+export function listingsFromDom(
+  root: ParentNode | null,
+  extras: { assets?: SteamAssetIndex | null; listinginfo?: Record<string, ListingInfo> } = {}
+): Listing[] {
+  const hoverHtml = innerHtmlOf(root);
+  return assembleListings({
+    info: extras.listinginfo,
+    htmlRows: parseListingDoc(root),
+    hovers: parseHovers(hoverHtml),
+    assets: extras.assets ?? assetIndex(),
+  });
+}
+
+const LISTING_HOST_IDS = [
+  "tabContentsMyActiveMarketListingsRows",
+  "tabContentsMyActiveMarketListingsTable",
+  "tabContentsMyListings",
+];
+
+/**
+ * The rows Steam drew on this page, in the amount Steam drew them.
+ *
+ * This is what the scan is asked to be limited to: whatever the page-size
+ * selector currently shows. Nothing else is read, priced, or touched.
+ */
+export function listingsOnPage(): Listing[] {
+  if (typeof document === "undefined") return [];
+  for (const id of LISTING_HOST_IDS) {
+    const host = document.getElementById(id);
+    if (!host) continue;
+    const found = listingsFromDom(host, { assets: assetIndex() });
+    if (found.length) return found;
+  }
+  try {
+    const rows = document.querySelectorAll?.('.market_listing_row[id^="mylisting_"]');
+    if (rows && rows.length) return listingsFromDom(document.body, { assets: assetIndex() });
+  } catch {
+    /* test stub has no querySelectorAll */
+  }
+  return [];
+}
+
+/** Fills in listings the DOM could not resolve. Returns how many were repaired. */
+export function applyAssetRefs(listings: Listing[], refs: Map<string, AssetRef>): number {
+  let fixed = 0;
+  for (const listing of listings) {
+    if (listing.assetid) continue;
+    const ref = refs.get(listing.listingId);
+    if (!ref?.assetid) continue;
+    listing.assetid = ref.assetid;
+    listing.contextid = ref.contextid || listing.contextid;
+    if (!listing.appid && ref.appid) listing.appid = ref.appid;
+    fixed += 1;
+  }
+  return fixed;
 }
 
 function buyerFromInfo(info: ListingInfo): Cents {

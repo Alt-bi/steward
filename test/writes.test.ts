@@ -3,9 +3,9 @@ import "./support/env";
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import { calls, reports, resetEnv, setAcquire, setSteam } from "./support/env";
+import { calls, jsonReply, reports, resetEnv, setAcquire, setSteam } from "./support/env";
 
-import { removeListing, sellItem } from "../src/steam/actions";
+import { removeListing, sellItem, sellItemWhenReady } from "../src/steam/actions";
 import { SteamError } from "../src/steam/net";
 import { fetchMyListings } from "../src/steam/mylistings";
 import { describeRelistFailure, haltsRun, outcomeUnknown } from "../src/content/ui/errors";
@@ -283,5 +283,62 @@ describe("mylistings walks every page when the account needs them", () => {
       fetchMyListings(10, { abort: () => ++asks > 3 }),
       (err: unknown) => err instanceof SteamError && err.kind === "aborted"
     );
+  });
+});
+
+
+describe("re-listing after Steam stopped the hand-back", () => {
+  const plan = { appid: 753, contextid: "6", assetid: "9", amount: 1, targetSeller: 500 };
+  const noPace = { backoffMs: () => 0 };
+
+  it("waits out the lie that the item is not in the inventory" as string, async () => {
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+    let n = 0;
+    setSteam(() => {
+      n += 1;
+      if (n < 3) {
+        return jsonReply({
+          success: false,
+          message:
+            "There was an error processing your request: The item is no longer in your inventory, or it is not tradeable on the Community Market.",
+          needs_mobile_confirmation: false,
+        });
+      }
+      return jsonReply({ success: true, jobid: "7" });
+    });
+    const result = await sellItemWhenReady(plan, {}, { attempts: 8, ...noPace });
+    assert.equal(result.success, true);
+    assert.equal(calls.filter((u) => u.includes("/market/sellitem/")).length, 3);
+  });
+
+  it("does not fire a real refusal a second time" as string, async () => {
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+    setSteam(() =>
+      jsonReply({
+        success: false,
+        message: "There are currently no listings for the requested item, please try again at a later time.",
+      })
+    );
+    await assert.rejects(() => sellItemWhenReady(plan, {}, { attempts: 8, ...noPace }));
+    assert.equal(calls.filter((u) => u.includes("/market/sellitem/")).length, 1);
+  });
+
+  it("gives up with the original answer, not a new error" as string, async () => {
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+    setSteam(() =>
+      jsonReply({
+        success: false,
+        message: "The item is no longer in your inventory.",
+      })
+    );
+    await assert.rejects(
+      () => sellItemWhenReady(plan, {}, { attempts: 4, ...noPace }),
+      (err: unknown) =>
+        err instanceof SteamError && /no longer in your inventory/.test(err.message)
+    );
+    assert.equal(calls.filter((u) => u.includes("/market/sellitem/")).length, 4);
   });
 });

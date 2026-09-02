@@ -1,6 +1,6 @@
 {
   "name": "steward",
-  "version": "2.36.2",
+  "version": "2.37.0",
   "private": true,
   "description": "Open-source Steam Community Market helper. No ads, no subscriptions, no telemetry.",
   "type": "module",

@@ -1,5 +1,5 @@
 import type { Cents } from "../core/types";
-import { postForm, SteamError, type Pacing } from "./net";
+import { postForm, sleep, SteamError, type Pacing } from "./net";
 import { sessionId } from "./page-context";
 
 /**
@@ -81,6 +81,58 @@ export async function sellItem(plan: SellOrder, pacing: Pacing): Promise<SellRes
     throw new SteamError("http", String(json?.message ?? json?.error ?? "sell_failed"));
   }
   return json;
+}
+
+/**
+ * The one refusal that is a lie about the present and a truth about a second
+ * from now.
+ *
+ * `removelisting` returns before the asset is handed back. For a few seconds the
+ * inventory does not hold it yet and `sellitem` answers that the item «is no
+ * longer in your inventory» — which reads like a lost lot and stopped a whole
+ * run, while waiting out those seconds was the entire cure. Every market tool
+ * that survives this account does exactly that: ask again.
+ */
+const ASSET_RETURNING = /no longer in your inventory|не находится в вашем инвентаре/i;
+
+export function assetStillReturning(err: unknown): boolean {
+  return err instanceof SteamError && ASSET_RETURNING.test(err.message);
+}
+
+export interface RelistOptions {
+  attempts?: number;
+  /** Overridable so tests do not sit through real backoff. */
+  backoffMs?: (attempt: number) => number;
+  /** Called before each extra try, with the number of tries already spent. */
+  onRetry?: (attempt: number) => void;
+}
+
+/**
+ * `sellItem`, asking again while Steam finishes handing the asset back.
+ *
+ * Only the returning-asset refusal is retried: a real refusal — price under the
+ * minimum, trade ban, market closed — is a verdict, and firing it ten times per
+ * lot would be asking for a rate limit. When the attempts run out the original
+ * error is what the caller hears; nothing about the old behavior is swallowed.
+ */
+export async function sellItemWhenReady(
+  plan: SellOrder,
+  pacing: Pacing,
+  opts: RelistOptions = {}
+): Promise<SellResult> {
+  const attempts = Math.max(1, opts.attempts ?? 8);
+  const backoff = opts.backoffMs ?? ((n) => Math.min(2_000 * n, 6_000));
+  let spent = 0;
+  for (;;) {
+    try {
+      return await sellItem(plan, pacing);
+    } catch (err) {
+      spent += 1;
+      if (spent >= attempts || !assetStillReturning(err) || pacing.abort?.()) throw err;
+      opts.onRetry?.(spent);
+      await sleep(backoff(spent));
+    }
+  }
 }
 
 export function needsConfirmation(result: SellResult): boolean {

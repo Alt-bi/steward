@@ -1444,3 +1444,30 @@ screen locked, the tab went `hidden`, and the browser froze our timers mid-
 sixty minutes. Now the note reads "табка уснула — разбуди её" whenever the
 pause is older than the machine's clock can account for: a frozen pause is
 reported as frozen, not as a promise.
+
+## 2.37.0 — the page is the scan, and the lie about the inventory is waited out
+
+Two complaints, one release.
+
+**«Зачем сканировать все лоты?».** The scan now takes exactly the rows Steam
+drew on the page it is open on — however many the owner's page-size choice
+shows — and asks nothing about the rest of the account. The DOM reader came
+back (`listingsOnPage` → `listingsFromDom` → `parseListingDoc`), because on
+market pages that still paint, the rows are there and complete for their page.
+Each row's assetid is taken from what Steam itself prints in the row's cancel
+button (`RemoveMarketListing('mylisting', id, appid, context, assetid)`) — the
+same four numbers Steam uses to take a lot down, so no lookup and no widening:
+zero extra requests on the common path. Only when a row somehow names no asset
+does one `mylistings` answer go out, as a lookup, and a lot it cannot name is
+refused by the planner rather than repriced.
+
+**«Снят, но НЕ выставлен — предмет больше не находится в вашем инвентаре».**
+`removelisting` returns before the asset is physically back; for a few seconds
+`sellitem` answers «no longer in your inventory» about an item that is arriving.
+The run stopped on lot 1 of 12 and correctly refused to keep removing. Now
+`sellItemWhenReady` retries that one refusal with backoff (up to 8 tries), and
+only that refusal — a real «no» is still a verdict fired once. When the retries
+run out the lot is still reported stranded, exactly as before.
+
+Tests: 684, with the retry cycle given its own three (waits out the lie, does
+not refire a real refusal, gives up with the original answer).

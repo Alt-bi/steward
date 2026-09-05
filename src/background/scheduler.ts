@@ -32,7 +32,15 @@ interface Budget {
 const LIMITS: Record<NetKind, Budget> = {
   price: { ratePerMin: 15, capacity: 4, minRatePerMin: 3 },
   search: { ratePerMin: 20, capacity: 4, minRatePerMin: 4 },
-  listings: { ratePerMin: 10, capacity: 2, minRatePerMin: 3 },
+  /**
+   * Measured 2026-09-03 on a live account: `/render/` answered thirty calls at
+   * 1.2 s apart without degrading once — the zeros that looked like a throttle
+   * that afternoon turned out to be an unserved `count`, not a limit. 10/min
+   * was set for the action endpoint that was refusing anyway, and it made a
+   * ten-item page cost a full minute of waiting. 20 matches the global IP
+   * budget, which is the real ceiling either way.
+   */
+  listings: { ratePerMin: 20, capacity: 4, minRatePerMin: 5 },
   history: { ratePerMin: 6, capacity: 1, minRatePerMin: 2 },
   /**
    * One call per scan for a small account, and since 2.23.0 a walk of up to
@@ -58,6 +66,13 @@ interface KindState {
   /** Current adaptive rate; walks down on refusals and back up on success. */
   ratePerMin: number;
   okStreak: number;
+  /**
+   * This endpoint alone is standing in a pause. Separate from the global
+   * cooldown because the two answer different facts: Steam metering the IP
+   * stops everything, one endpoint answering with a web page stops that
+   * endpoint. Zero — or missing, on state saved by an older build — is «no».
+   */
+  cooldownUntil?: number;
 }
 
 interface State {
@@ -98,6 +113,7 @@ function kindState(budget: Budget): KindState {
     lastRefill: 0,
     ratePerMin: budget.ratePerMin,
     okStreak: 0,
+    cooldownUntil: 0,
   };
 }
 
@@ -195,6 +211,15 @@ export async function acquire(kind: NetKind): Promise<Slot> {
   }
 
   const k = refillBucket(state.kinds[kind], LIMITS[kind], now);
+  /**
+   * This endpoint's own pause. It holds back the kind that refused and nothing
+   * else — which is the whole point: the run that just lost the listing book
+   * still has `priceoverview` and `search` to fall back on, and they are the
+   * fallback only if they are still allowed to speak.
+   */
+  if (k.cooldownUntil && now < k.cooldownUntil) {
+    return { ok: false, waitMs: k.cooldownUntil - now, reason: "cooldown" };
+  }
   const g = refillBucket(state.global, GLOBAL, now);
   if (k.tokens >= 1 && g.tokens >= 1) {
     k.tokens -= 1;
@@ -235,6 +260,28 @@ export async function report(
         state.global.okStreak = 0;
         state.global.ratePerMin = Math.min(GLOBAL.ratePerMin, state.global.ratePerMin + RELAX_STEP);
       }
+      break;
+    }
+
+    /**
+     * Markup where JSON belongs: this endpoint is refusing us.
+     *
+     * It gets the same treatment a 429 gives the kind — half the rate, no burst
+     * left, a pause — and none of what a 429 gives the account: no strike, no
+     * breaker, no global cooldown. Measured on 2026-09-02: two homepages from
+     * the listing book left the breaker open, so the rescue pass that exists
+     * for exactly this case could not send one request, and the run reported
+     * «посчитано по рыночному минимуму: 0 из 10» having asked nothing. One
+     * endpoint's refusal must not be able to switch off the endpoints that
+     * still answer.
+     */
+    case "wrong_shape": {
+      k.okStreak = 0;
+      state.global.okStreak = 0;
+      k.ratePerMin = Math.max(limit.minRatePerMin, Math.floor(k.ratePerMin / 2));
+      k.tokens = 0;
+      k.lastRefill = now;
+      k.cooldownUntil = Math.max(k.cooldownUntil ?? 0, now + BASE_COOLDOWN_MS);
       break;
     }
 

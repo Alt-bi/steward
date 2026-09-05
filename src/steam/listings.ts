@@ -1,6 +1,7 @@
 import { bookListingFrom, type PlainBookListing } from "../page/ssr";
 import type { Cents, PageListingInfo } from "../core/types";
 import { fetchJson, type Pacing } from "./net";
+import { country, currencyId, language } from "./page-context";
 
 /**
  * The public listing page for one item. Unlike `priceoverview` this returns the
@@ -10,36 +11,41 @@ import { fetchJson, type Pacing } from "./net";
  */
 
 /**
- * `QueryListingsForItem` — what replaced `/render/`.
+ * `/market/listings/{appid}/{name}/render/` — the classic book, measured alive.
  *
- * The old endpoint answers the rewritten market with the page itself, so the
- * book now comes from the same call the item page makes: one action endpoint
- * where the operation is named in `q` and its arguments are a JSON array in
- * `qp`. Same book, and each row additionally states whether it is ours.
+ * An earlier session concluded it was dead and moved everything onto the
+ * rewritten frontend's `market/actions?q=QueryListingsForItem`. Measured on a
+ * live logged-in Edge on 2026-09-03, both halves of that turned out to be
+ * backwards:
  *
- * One header decides whether a logged-in session gets JSON or a redirect to
- * the market home. Read out of the rewritten frontend's own bundles: every
- * action fetch it makes carries `x-valve-request-type: queryAction` (POSTs
- * send `mutationAction`) — the loader signing its own traffic. Without that
- * signature a session on the new frontend is served the homepage as markup,
- * which is why a cookie-less probe saw a live endpoint (200, 205 KB of JSON)
- * while a logged-in tab was handed «Сообщество Steam :: Торговая площадка
- * сообщества Steam» twice and the exact check died. The signature is not
- * secret — it is the page's own header, copied verbatim.
+ * - `actions` answers **the market homepage as HTML, 200, 1 MB**, with the
+ *   loader header, without it, and with the classic AJAX signature. Not a
+ *   redirect and not a throttle — it simply does not answer this context. That
+ *   is the «Steam дважды прислал веб-страницу» every scan was ending in.
+ * - `/render/` answers `application/json` on the first try, every try: the
+ *   listings keyed by listing id with `converted_price` + `converted_fee`, the
+ *   `total_count` behind them, and it honours `count` (asked 20, got 20 — the
+ *   action endpoint always served twenty whatever we asked).
+ *
+ * Two facts fell out of the same measurement and are worth keeping here:
+ *
+ * - **There is no group-id wall.** `AK-47 | Redline (Field-Tested)` answers by
+ *   `market_hash_name`, 1201 listings deep. The whole `strItemName`-is-a-group-id
+ *   detour existed only because the action endpoint needed it.
+ * - **A commodity has no rows.** `Fracture Case` answers `total_count: 1` with
+ *   an empty `listinginfo`: cases and keys trade through an order book, not
+ *   through listings. That is an answer, not a refusal, and the caller settles
+ *   those from `priceoverview` instead.
  */
-interface BookResponse {
-  data?: {
-    more?: boolean;
-    start?: number;
-    total_count?: number;
-    listings?: unknown[];
-  } | null;
+interface RenderResponse {
+  success?: boolean;
+  start?: number;
+  pagesize?: number | string;
+  total_count?: number;
+  /** listingid -> the row, same shape `g_rgListingInfo` has on the item page. */
+  listinginfo?: Record<string, PageListingInfo>;
 }
 
-/**
- * The page Steam actually serves, whatever `count` says. Measured, not assumed:
- * asking for 1, 10 and 100 all answered with twenty rows and `more: true`.
- */
 export const BOOK_PAGE = 20;
 
 export interface MarketListing {
@@ -153,51 +159,56 @@ export async function fetchListingBook(
   itemName: string,
   pacing: Pacing,
   count = BOOK_PAGE,
-  /** Keep only this item of the group; omit on a page that holds just one. */
-  hash?: string,
   opts: BookOptions = {}
 ): Promise<BookPage> {
   /**
-   * The query object the rewritten frontend itself sends — filters included,
-   * `count` not: the endpoint answers one fixed page of twenty however deep
-   * we ask, and an argument the page never sends is one more way to stop
-   * looking like the page. `count` stays in our signature because callers
-   * still size their expectations by it; it just no longer rides the wire.
+   * `query=` empty and `start=0`: the whole book from the top, in the wallet's
+   * own currency. `language` and `country` ride along because Steam prices the
+   * answer by them — leave them off and a rouble account can be quoted in
+   * dollars, which lands in the same cache key as the roubles.
    */
-  const query = [
-    { appid, strItemName: itemName, filters: {}, accessoryFilters: {}, propertyFilters: {}, start: 0 },
-  ];
   const url =
-    "https://steamcommunity.com/market/actions" +
-    `?q=QueryListingsForItem&qp=${encodeURIComponent(JSON.stringify(query))}`;
+    `https://steamcommunity.com/market/listings/${appid}/${encodeURIComponent(itemName)}/render/` +
+    `?query=&start=0&count=${count}` +
+    `&currency=${currencyId()}&language=${encodeURIComponent(language())}` +
+    `&country=${encodeURIComponent(country())}`;
 
-  const data = await fetchJson<BookResponse>(url, {
+  const data = await fetchJson<RenderResponse>(url, {
     kind: "listings",
     ...pacing,
-    /** Signed like the page's own fetch: the loader header, no legacy AJAX mark. */
-    ajax: false,
-    init: { headers: { "x-valve-request-type": "queryAction" } },
     /**
      * A book of zero is an answer, not a stonewall.
      *
      * Counting it as one cost twice over: the governor saw four «empty» replies
      * in a row and throttled the whole scan, and the caller got an exception
      * where it needed to see `total_count: 0` — the one fact that proves we asked
-     * with a name Steam does not answer to. Only a reply with no `data` block at
-     * all is Steam declining to speak.
+     * with a name Steam does not answer to.
+     *
+     * An empty `listinginfo` under a non-zero `total_count` is neither: that is
+     * a commodity, whose lots live in an order book rather than in listings.
+     * `priceoverview` prices those, and calling it a refusal here would put the
+     * whole scan into a cooldown over cases and keys behaving normally.
      */
     isEmpty: (d) => {
-      const body = (d as BookResponse)?.data;
-      if (!body) return true;
+      const body = (d ?? {}) as RenderResponse;
+      if (body.success === false) return true;
+      if (typeof body.total_count !== "number") return true;
       return opts.emptyIsRefusal === true && body.total_count === 0;
     },
   });
 
-  const body = data.data;
+  const listings = listingsFromInfo(data.listinginfo);
+  const total = typeof data.total_count === "number" ? data.total_count : null;
   return {
-    listings: listingsFromBook(body?.listings, hash),
-    more: body?.more === true,
-    total: typeof body?.total_count === "number" ? body.total_count : null,
+    listings,
+    /**
+     * Steam does not say «more» here, but it does say how many exist, and that
+     * is the stronger statement: rows we did not receive are rows we did not
+     * look at, and a window of nothing but our own lots must never be read as
+     * «nobody is under us».
+     */
+    more: total != null && listings.length < total,
+    total,
   };
 }
 
@@ -206,10 +217,9 @@ export async function fetchCheapestListings(
   appid: number,
   itemName: string,
   pacing: Pacing,
-  count = BOOK_PAGE,
-  hash?: string
+  count = BOOK_PAGE
 ): Promise<MarketListing[]> {
-  return (await fetchListingBook(appid, itemName, pacing, count, hash)).listings;
+  return (await fetchListingBook(appid, itemName, pacing, count)).listings;
 }
 
 /**
@@ -265,6 +275,36 @@ export interface CompetitorScan {
    * there returns an empty book however many times it is asked.
    */
   unnamed: boolean;
+  /**
+   * The rows the book handed over, in price order.
+   *
+   * Kept so ownership can be re-decided without asking Steam again: learning
+   * that one of these lots is ours after the fact is a pure recount, not a
+   * second request.
+   */
+  rows: readonly MarketListing[];
+  /** Something sits past what we read, so `allOurs` is a floor and not a verdict. */
+  truncated: boolean;
+}
+
+/**
+ * The same book, counted again against a bigger set of our own listing ids.
+ *
+ * Learning after the fact that the cheapest lot was ours is a recount, not a
+ * second request — the rows are still here.
+ */
+export function rescanOwnership(
+  scan: CompetitorScan,
+  ourListingIds: ReadonlySet<string>
+): CompetitorScan {
+  let competitor: Cents | null = null;
+  for (const listing of scan.rows) {
+    if (isOurs(listing, ourListingIds)) continue;
+    competitor = listing.buyer;
+    break;
+  }
+  const allOurs = scan.rows.length > 0 && competitor == null;
+  return { ...scan, competitor, allOurs, crowded: allOurs && scan.truncated };
 }
 
 /**
@@ -317,23 +357,37 @@ export function competitorFromListings(
     crowded: listings.length > 0 && competitor == null && truncated,
     flagged: listings.length > 0 && listings.every((l) => l.mine !== undefined),
     unnamed: listings.length === 0 && book?.total === 0,
+    rows: listings,
+    truncated,
   };
 }
 
 /**
- * How deep to ask the book to go.
+ * How deep to ask the book to go — and the depth has to be one Steam accepts.
  *
- * Our own listings sit at the bottom of it precisely when we hold the minimum,
- * which is the case worth checking — so a fixed window of ten answered «no
- * competitor» for anyone holding ten lots of the same case.
+ * Measured 2026-09-03 against a live account, same item, one request each:
  *
- * Steam ignores this today and serves `BOOK_PAGE` regardless; the number is kept
- * because it costs nothing and the day the parameter is honoured again the
- * deeper read is the one we want. What must never depend on it is whether the
- * book was complete — `more` answers that.
+ * | count | answer |
+ * |-------|--------|
+ * | 1, 10, 20, 100 | `success: true`, the book |
+ * | 5, 11, 12, 25, 50, 75 | `success: false`, `total_count: 0`, no rows |
+ *
+ * So `count` is a whitelist, not a number, and everything off it comes back as
+ * an empty book — which this codebase reads, correctly, as Steam refusing. The
+ * old window was `ourCount + 10`, i.e. **11 for every item we hold one lot of**:
+ * every request would have answered «no listings» about items we are ourselves
+ * selling, two of those stop the run, and four in a row put the governor into a
+ * cooldown. A silent, total failure that looks exactly like a throttle.
+ *
+ * The depth still has to clear our own lots, because they sit at the bottom of
+ * the book precisely when we hold the minimum — so we round *up* to the next
+ * size Steam will serve.
  */
 export function scanWindow(ourCount: number): number {
-  return Math.min(100, Math.max(10, ourCount + 10));
+  const wanted = ourCount + 10;
+  if (wanted <= 10) return 10;
+  if (wanted <= 20) return 20;
+  return 100;
 }
 
 /** One request: the market minimum, the competitor behind it, and which is which. */
@@ -358,22 +412,11 @@ export async function scanCompetitors(
   pacing: Pacing,
   /** How many lots of *this* item are ours — the whole id set spans every item. */
   ourCount = ourListingIds.size,
-  /**
-   * The internal name to ask the book with — the group id apps like 730 answer
-   * to instead of `market_hash_name`. Given, the book covers every wear of the
-   * skin, so `hash` keeps only this item's rows.
-   */
-  groupName?: string,
   opts: ScanOptions = {}
 ): Promise<CompetitorScan> {
   const count = scanWindow(ourCount);
-  const book = await fetchListingBook(
-    appid,
-    groupName ?? hash,
-    pacing,
-    count,
-    groupName ? hash : undefined,
-    { emptyIsRefusal: ourCount > 0 && opts.nameMayBeWrong !== true }
-  );
+  const book = await fetchListingBook(appid, hash, pacing, count, {
+    emptyIsRefusal: ourCount > 0 && opts.nameMayBeWrong !== true,
+  });
   return competitorFromListings(book.listings, ourListingIds, count, book);
 }

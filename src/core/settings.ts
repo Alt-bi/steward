@@ -1,4 +1,4 @@
-import { clampSellSettings, DEFAULT_SELL_SETTINGS, type SellSettings } from "./sell";
+import { DEFAULT_SELL_SETTINGS, type SellSettings } from "./sell";
 
 export interface Settings {
   /** Pause between remove/relist calls. Steam bans on frequency, not volume. */
@@ -9,6 +9,15 @@ export interface Settings {
   skipSelfUndercut: boolean;
   /** Reprice at most one of our listings per item per pass. */
   onePerItem: boolean;
+  /**
+   * How far a single lot may fall in one move, in percent of what it asks now.
+   *
+   * The guard rail on the one button that cannot be taken back. A book with one
+   * cheap stranger in it turns «подрезать на копейку» into «минус шестьдесят
+   * процентов», and on a page of a hundred lots that is a decision nobody
+   * inspected row by row. 100 means no ceiling.
+   */
+  maxDropPercent: number;
   /** Parallel price lookups. The background scheduler still paces them. */
   scanConcurrency: number;
   /** Resolve the true competitor minimum via listings/render, not priceoverview. */
@@ -20,31 +29,70 @@ export interface Settings {
   priceSource: "search" | "priceoverview";
   /** How long a fetched price stays good. Longer means fewer requests on a re-scan. */
   priceTtlMinutes: number;
-  /** How the inventory feature prices what it lists. */
+  /**
+   * How the inventory feature prices what it lists.
+   *
+   * Fixed like the rest: the strategy picker, its step and its per-item cap
+   * were three controls on the inventory tab, and the tab now lists at the
+   * market minimum. Stamped over storage on read, so a strategy chosen by the
+   * old picker cannot outlive it.
+   */
   sell: SellSettings;
   /**
    * Hard ceiling on a one-click purchase, in cents.
    *
    * A parsing mistake in a price is a mistake that spends real money, so the
-   * amount is checked against this before anything is sent. Set it to what you
-   * are willing to lose to a bug, not to what you are willing to spend.
+   * amount is checked against this before anything is sent. It is a refusal,
+   * never a budget: raising it buys nothing, lowering it only ever costs a
+   * purchase that has to be made by hand.
    */
   quickBuyMaxCents: number;
   /** Feature id -> enabled. */
   features: Record<string, boolean>;
 }
 
-export const DEFAULT_SETTINGS: Settings = {
+/** Everything the owner is not asked to guess. */
+type FixedKey =
+  | "delayMs"
+  | "undercutCents"
+  | "skipSelfUndercut"
+  | "onePerItem"
+  | "maxDropPercent"
+  | "scanConcurrency"
+  | "exactCompetitorLow"
+  | "priceSource"
+  | "priceTtlMinutes"
+  | "quickBuyMaxCents";
+
+/**
+ * The standard, stated once.
+ *
+ * These were nine fields and two checkboxes in the popup, and every one of them
+ * had exactly one right answer and a range of worse ones. The pause is what
+ * keeps the IP off Steam's list; the concurrency is what the governor was
+ * measured around; «на копейку ниже» is the entire premise of the tab. A field
+ * that can only be set wrong is not a setting, it is a trap with a label.
+ *
+ * They are stamped over storage on every read rather than merely defaulted, so
+ * a value left behind by the old popup — a 8-second pause, a
+ * `priceoverview` source — cannot outlive the field that wrote it.
+ */
+export const FIXED_SETTINGS: Pick<Settings, FixedKey> = {
   delayMs: 2500,
   undercutCents: 1,
   skipSelfUndercut: true,
   onePerItem: true,
+  maxDropPercent: 35,
   scanConcurrency: 2,
   exactCompetitorLow: true,
   priceSource: "search",
   priceTtlMinutes: 15,
-  sell: DEFAULT_SELL_SETTINGS,
   quickBuyMaxCents: 50_000,
+};
+
+export const DEFAULT_SETTINGS: Settings = {
+  ...FIXED_SETTINGS,
+  sell: DEFAULT_SELL_SETTINGS,
   features: {},
 };
 
@@ -54,7 +102,8 @@ export async function loadSettings(): Promise<Settings> {
     return {
       ...DEFAULT_SETTINGS,
       ...items,
-      sell: { ...DEFAULT_SETTINGS.sell, ...(items.sell ?? {}) },
+      ...FIXED_SETTINGS,
+      sell: { ...DEFAULT_SETTINGS.sell },
       features: { ...DEFAULT_SETTINGS.features, ...(items.features ?? {}) },
     };
   } catch {
@@ -62,23 +111,12 @@ export async function loadSettings(): Promise<Settings> {
   }
 }
 
+/**
+ * Nothing in the extension writes settings any more — every one of them is
+ * stamped from the standard on read. Kept as the one door, so that if a setting
+ * ever earns a control again it goes through here rather than through
+ * `chrome.storage` scattered across the features.
+ */
 export async function saveSettings(patch: Partial<Settings>): Promise<void> {
   await chrome.storage.local.set(patch);
-}
-
-export function clampSettings(s: Partial<Settings>): Partial<Settings> {
-  const out: Partial<Settings> = { ...s };
-  if (out.delayMs != null) out.delayMs = Math.min(8000, Math.max(1500, Math.trunc(out.delayMs) || 2500));
-  if (out.undercutCents != null) out.undercutCents = Math.min(500, Math.max(1, Math.trunc(out.undercutCents) || 1));
-  if (out.scanConcurrency != null) {
-    out.scanConcurrency = Math.min(4, Math.max(1, Math.trunc(out.scanConcurrency) || 2));
-  }
-  if (out.priceTtlMinutes != null) {
-    out.priceTtlMinutes = Math.min(1440, Math.max(1, Math.trunc(out.priceTtlMinutes) || 15));
-  }
-  if (out.quickBuyMaxCents != null) {
-    out.quickBuyMaxCents = Math.min(10_000_000, Math.max(0, Math.trunc(out.quickBuyMaxCents) || 0));
-  }
-  if (out.sell) out.sell = { ...DEFAULT_SELL_SETTINGS, ...out.sell, ...clampSellSettings(out.sell) };
-  return out;
 }

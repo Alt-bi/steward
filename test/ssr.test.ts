@@ -94,7 +94,14 @@ describe("projectSsr", () => {
     };
     cache.queries[0]!.state.data.pages[0]!.listings[0]!.bMine = 1;
     (fuzzy.SSR.renderContext as { queryData: string }).queryData = JSON.stringify(cache);
-    assert.equal(projectSsr(fuzzy)?.listings[0]?.mine, false);
+    /**
+     * Not `false` either: a shape we do not recognise is Steam not answering,
+     * and `false` is an answer other code is entitled to act on. What matters
+     * here is only that it is never `true` — that is what would have us pass
+     * over a stranger's lot as if it were our own.
+     */
+    assert.notEqual(projectSsr(fuzzy)?.listings[0]?.mine, true);
+    assert.equal(projectSsr(fuzzy)?.listings[0]?.mine, undefined);
   });
 
   it("survives every shape it could be handed instead", () => {

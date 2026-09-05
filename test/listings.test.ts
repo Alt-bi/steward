@@ -175,6 +175,26 @@ describe("ownership straight from the book", () => {
     assert.equal(low.source, "listings");
   });
 
+  it("does not claim ownership was stated when the book stops flagging", () => {
+    /**
+     * The tie guard's whole job is to tell «Steam named the owner of every lot»
+     * from «nobody named anyone». It reads `mine !== undefined`, so a parser
+     * that turns a missing `bMine` into `false` makes it a rubber stamp: always
+     * flagged, always allowed to undercut a lot priced exactly like ours — and
+     * that lot could be our own on another page, which is the one mistake this
+     * whole path exists to avoid.
+     */
+    const unflagged = listingsFromBook([
+      { listingid: "a", unPrice: 1000, unFee: 200 },
+      { listingid: "b", unPrice: 1000, unFee: 200 },
+    ]);
+    const scan = competitorFromListings(unflagged, new Set(), unflagged.length);
+    assert.equal(scan.flagged, false);
+    assert.equal(competitorFromScan(scan, false).theirs, false);
+    /** And with our own ids known, the same book still settles the price. */
+    assert.equal(competitorFromScan(scan, true).theirs, true);
+  });
+
   it("does not claim ownership was stated when the rows never said", () => {
     const anonymous = listingsFromInfo({ a: { listingid: "a", price: 100, fee: 15 } });
     assert.equal(competitorFromListings(anonymous, new Set(), 10).flagged, false);
@@ -201,6 +221,22 @@ describe("scanWindow", () => {
     assert.equal(scanWindow(0), 10);
     assert.equal(scanWindow(500), 100, "still one page, never a crawl");
   });
+
+  it("only ever asks for a depth Steam actually serves", () => {
+    /**
+     * Measured 2026-09-03: `/render/` answers `count` of 1, 10, 20 and 100, and
+     * answers 5, 11, 12, 25, 50 and 75 with `success: false` and an empty book.
+     * `ourCount + 10` is 11 for every item we hold a single lot of — so the old
+     * window asked an unserved depth on essentially every request and read the
+     * refusal back as «nobody is selling this», about items we are selling.
+     */
+    const served = new Set([1, 10, 20, 100]);
+    for (let ours = 0; ours <= 200; ours++) {
+      const count = scanWindow(ours);
+      assert.ok(served.has(count), `count=${count} для ${ours} наших лотов Steam не отдаёт`);
+      assert.ok(count >= Math.min(100, ours + 1), `окно ${count} не перекрывает ${ours} наших лотов`);
+    }
+  });
 });
 
 describe("fetchListingBook, over the wire", () => {
@@ -209,27 +245,75 @@ describe("fetchListingBook, over the wire", () => {
     setAcquire(() => ({ ok: true as const }));
   });
 
-  const row = (id: string, mine: boolean) => ({
-    listingid: id,
-    unPrice: 1000,
-    unFee: 150,
-    bMine: mine,
-    description: { market_hash_name: "Item" },
+  /**
+   * The shape `/market/listings/{appid}/{name}/render/` actually answers with,
+   * measured on a live logged-in account on 2026-09-03: `listinginfo` keyed by
+   * listing id, prices split into `converted_price` + `converted_fee`, and the
+   * `total_count` behind the window.
+   */
+  function render(rows: [id: string, price: number, fee: number][], total = rows.length) {
+    const listinginfo: Record<string, unknown> = {};
+    for (const [id, price, fee] of rows) {
+      listinginfo[id] = {
+        listingid: id,
+        price,
+        fee,
+        converted_price: price,
+        converted_fee: fee,
+        publisher_fee_percent: "0.10",
+      };
+    }
+    return jsonReply({ success: true, start: 0, pagesize: rows.length, total_count: total, listinginfo });
+  }
+
+  it("asks the classic listing page, in the wallet's own currency", async () => {
+    let asked = "";
+    let seenInit: RequestInit | undefined;
+    setSteam((url, init) => {
+      asked = String(url);
+      seenInit = init;
+      return render([["a", 1000, 150]]);
+    });
+
+    await scanCompetitors(753, "489260-Rock Golem (Foil)", new Set(), {}, 1);
+
+    assert.ok(
+      asked.startsWith(
+        "https://steamcommunity.com/market/listings/753/" +
+          encodeURIComponent("489260-Rock Golem (Foil)") +
+          "/render/"
+      ),
+      asked
+    );
+    assert.match(asked, /[?&]count=\d+/, asked);
+    assert.match(asked, /[?&]currency=\d+/, asked);
+    assert.match(asked, /[?&]country=/, asked);
+    const headers = seenInit?.headers as Record<string, string> | undefined;
+    assert.equal(
+      (headers ?? {})["X-Requested-With"],
+      "XMLHttpRequest",
+      "this is a classic endpoint and wants the classic signature"
+    );
+  });
+
+  it("reads the price a buyer pays and leaves our own lots out of it", async () => {
+    /** Ours at 11,50 is the cheapest row; the competitor is the 13,80 behind it. */
+    setSteam(() => render([["ours", 1000, 150], ["theirs", 1200, 180]]));
+    const scan = await scanCompetitors(753, "Card", new Set(["ours"]), {}, 1);
+    assert.equal(scan.marketLow, 1150);
+    assert.equal(scan.competitor, 1380);
+    assert.equal(scan.seen, 2);
+    assert.equal(scan.allOurs, false);
   });
 
   it("hands back an empty book instead of throwing it away, when the name may be wrong", async () => {
     /**
-     * The regression this exists for. An empty book used to be reported to the
-     * governor as a throttle and raised as an error, so the one fact worth having
-     * — `total_count: 0`, which proves the name wrong — never reached the caller,
-     * and four Counter-Strike items in a row backed the whole scan off.
-     *
-     * `nameMayBeWrong` is what makes this reading legal: a hash name on a
-     * group-id app really does answer empty forever. Without it, the same reply
-     * about an item we are selling is a refusal — see the test below.
+     * An empty book used to be reported to the governor as a throttle and raised
+     * as an error, so the one fact worth having — `total_count: 0`, which proves
+     * the name wrong — never reached the caller.
      */
-    setSteam(() => jsonReply({ data: { listings: [], total_count: 0, more: false } }));
-    const scan = await scanCompetitors(730, "Fracture Case", new Set(), {}, 1, undefined, {
+    setSteam(() => render([], 0));
+    const scan = await scanCompetitors(730, "Fracture Case", new Set(), {}, 1, {
       nameMayBeWrong: true,
     });
 
@@ -244,130 +328,56 @@ describe("fetchListingBook, over the wire", () => {
 
   it("calls an empty book a refusal when we are ourselves selling the item", async () => {
     /**
-     * Measured 2026-09-01: fifteen quick calls in, `QueryListingsForItem` began
-     * answering `{total_count: 0, listings: []}` for a card whose book it had
-     * just returned in full, and told the truth again after a minute's pause.
-     *
      * Our own live lot is in that book by definition, so zero cannot be an
-     * answer here. Read as one it said «nobody is selling this» — and the scan
-     * recorded that as a naming problem, wrote the whole app off, and checked 0
-     * of 10 items while reporting no error the user could act on.
+     * answer here. Read as one it said «nobody is selling this», and the scan
+     * recorded that as a naming problem and checked nothing.
      */
-    setSteam(() => jsonReply({ data: { listings: [], total_count: 0, more: false } }));
+    setSteam(() => render([], 0));
     await assert.rejects(
       () => scanCompetitors(753, "489260-Rock Golem (Foil)", new Set(["7"]), {}, 1),
       (err: Error) => (err as { kind?: string }).kind === "empty"
     );
     assert.ok(
       reports.some((r) => r.outcome === "empty"),
-      "the governor has to hear this one — it is why the next call gets a homepage"
+      "the governor has to hear this one"
     );
   });
 
+  it("treats a commodity's empty book as an answer, not as a refusal", async () => {
+    /**
+     * Measured on `Fracture Case`: `total_count: 1` with no `listinginfo` at
+     * all. Cases and keys trade through an order book, not through listings —
+     * so this is Steam answering normally, and `priceoverview` is what prices
+     * them. Filed as a refusal it would put the whole scan into a cooldown over
+     * an item behaving exactly as designed.
+     */
+    setSteam(() => render([], 1));
+    const scan = await scanCompetitors(730, "Fracture Case", new Set(["7"]), {}, 1);
+    assert.equal(scan.seen, 0);
+    assert.equal(scan.unnamed, false, "the book named a lot — it just is not a listing");
+    assert.equal(scan.competitor, null);
+    assert.ok(!reports.some((r) => r.outcome === "empty"));
+  });
+
   it("still calls a reply with no book at all a refusal", async () => {
-    /** No `data` block is Steam declining to speak, which the governor must see. */
     setSteam(() => jsonReply({ success: false }));
     await assert.rejects(() => scanCompetitors(753, "Card", new Set(), {}, 1));
     assert.ok(reports.some((r) => r.outcome === "empty"));
   });
 
-  it("carries Steam's own «there is more» into the verdict", async () => {
+  it("carries Steam's own count into the verdict", async () => {
     const ours = new Set<string>();
-    const listings = Array.from({ length: 20 }, (_, i) => {
+    const rows: [string, number, number][] = [];
+    for (let i = 0; i < 20; i++) {
       ours.add(`m${i}`);
-      return row(`m${i}`, true);
-    });
-    setSteam(() => jsonReply({ data: { listings, total_count: 1672, more: true } }));
+      rows.push([`m${i}`, 1000, 150]);
+    }
+    setSteam(() => render(rows, 1672));
 
-    const scan = await scanCompetitors(730, "G1807209A023004", ours, {}, 20);
+    const scan = await scanCompetitors(730, "AK-47 | Redline (Field-Tested)", ours, {}, 20);
     assert.equal(scan.seen, 20);
     assert.equal(scan.allOurs, true);
-    assert.equal(scan.crowded, true, "a full page of our own lots with a book below it");
+    assert.equal(scan.crowded, true, "a full window of our own lots with a book below it");
     assert.equal(scan.unnamed, false);
-  });
-
-  it("asks the book by the learned group id and keeps only this wear", async () => {
-    let asked = "";
-    const wearRow = (id: string, hash: string, mine = false) => ({
-      listingid: id,
-      unPrice: 1000,
-      unFee: 150,
-      bMine: mine,
-      description: { market_hash_name: hash },
-    });
-    setSteam((url) => {
-      asked = String(url);
-      return jsonReply({
-        data: {
-          listings: [
-            wearRow("a", "AK-47 | Redline (Field-Tested)"),
-            wearRow("b", "AK-47 | Redline (Minimal Wear)"),
-          ],
-          total_count: 1390,
-          more: true,
-        },
-      });
-    });
-
-    const scan = await scanCompetitors(
-      730,
-      "AK-47 | Redline (Minimal Wear)",
-      new Set(),
-      {},
-      1,
-      "G1807209A023004"
-    );
-
-    assert.ok(
-      asked.includes(encodeURIComponent("G1807209A023004")),
-      "the request went out under the internal name"
-    );
-    assert.equal(scan.seen, 1, "the other wear of the group is not this item's book");
-    assert.equal(scan.competitor, 1150);
-    assert.equal(scan.marketLow, 1150);
-    assert.equal(scan.unnamed, false);
-  });
-
-  it("signed exactly like the rewritten frontend's own fetch", async () => {
-    /**
-     * The bug this guards. A logged-in session sending the classic AJAX
-     * signature to `/market/actions` is served the market homepage as markup;
-     * the frontend's own fetch — only `x-valve-request-type: queryAction`, the
-     * filter objects in `qp`, no `country`/`currency` — gets JSON. Measured
-     * 2026-08-30: the homepage's own title arrived twice and the exact check
-     * died, while the shape below answered 200 with twenty rows.
-     */
-    let asked = "";
-    let seenInit: RequestInit | undefined;
-    setSteam((url, init) => {
-      asked = String(url);
-      seenInit = init;
-      return jsonReply({ data: { listings: [], total_count: 1600, more: true } });
-    });
-
-    await scanCompetitors(730, "G1807209A023004", new Set(), {}, 1, "G1807209A023004");
-
-    const headers = seenInit?.headers as Record<string, string>;
-    assert.equal(headers["x-valve-request-type"], "queryAction");
-    assert.ok(!("X-Requested-With" in headers), "the legacy AJAX mark must not ride along");
-
-    const qp = JSON.parse(decodeURIComponent(asked.split("qp=")[1]!.split("&")[0]!))[0];
-    assert.deepEqual(
-      { appid: qp.appid, filters: qp.filters, accessoryFilters: qp.accessoryFilters, propertyFilters: qp.propertyFilters, start: qp.start },
-      { appid: 730, filters: {}, accessoryFilters: {}, propertyFilters: {}, start: 0 }
-    );
-    assert.ok(!asked.includes("country="), "the frontend's URL carries no wallet params");
-  });
-
-  it("does not call a group book without our wear unanswerable", async () => {
-    /**
-     * The group answered — `total_count` is far from zero — the window is just
-     * full of the other wears. That is «unknown», not «the name is wrong».
-     */
-    setSteam(() => jsonReply({ data: { listings: [], total_count: 1390, more: true } }));
-    const scan = await scanCompetitors(730, "AK-47 | Redline (Field-Tested)", new Set(), {}, 1, "G1807209A023004");
-
-    assert.equal(scan.unnamed, false);
-    assert.equal(scan.competitor, null);
   });
 });

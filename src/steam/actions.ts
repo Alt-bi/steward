@@ -92,6 +92,14 @@ export async function sellItem(plan: SellOrder, pacing: Pacing): Promise<SellRes
  * longer in your inventory» — which reads like a lost lot and stopped a whole
  * run, while waiting out those seconds was the entire cure. Every market tool
  * that survives this account does exactly that: ask again.
+ *
+ * Waiting is only half of it. Measured 2026-09-04 on a live account: a lot
+ * holding asset `38179473068` was cancelled, and the card came back to the
+ * inventory as `39042662381`, marketable and tradable. **Steam hands the item
+ * back under a new assetid.** So asking again with the same id is asking a
+ * question that has become permanently false: eight tries, thirty seconds, the
+ * same honest refusal every time, and a lot left off the market. The retry has
+ * to re-find the item, not merely re-send it — that is what `relocate` is for.
  */
 const ASSET_RETURNING = /no longer in your inventory|не находится в вашем инвентаре/i;
 
@@ -99,12 +107,49 @@ export function assetStillReturning(err: unknown): boolean {
   return err instanceof SteamError && ASSET_RETURNING.test(err.message);
 }
 
+/**
+ * Steam's shrug, and why it is not a verdict.
+ *
+ * «Ошибка при выставлении предмета на продажу. Обновите страницу и повторите
+ * попытку.» is what `sellitem` answers when it will not say what went wrong —
+ * the listing rate limit lives in here, and so does whatever else Steam decides
+ * not to name. Measured 2026-09-04 on a live account: nineteen lots moved, the
+ * twentieth got this, and because nothing matched it the run stopped with
+ * fifty-four lots never touched.
+ *
+ * It is retried like the returning asset, but slower and fewer times. The
+ * returning asset is a second away and will certainly arrive; this one has
+ * refused for a reason it declined to give, and hammering it is how a pause
+ * becomes a block. The item is in the inventory throughout — the retry risks
+ * requests, never the lot.
+ */
+const SELL_SHRUG = /problem listing your item|Ошибка при выставлении предмета/i;
+
+export function sellRefusedVaguely(err: unknown): boolean {
+  return err instanceof SteamError && SELL_SHRUG.test(err.message);
+}
+
+/** Which refusal we are sitting out. */
+export type RetryReason = "returning" | "shrug";
+
 export interface RelistOptions {
   attempts?: number;
+  /** How many times to sit out Steam's unexplained refusal. */
+  vagueAttempts?: number;
   /** Overridable so tests do not sit through real backoff. */
   backoffMs?: (attempt: number) => number;
-  /** Called before each extra try, with the number of tries already spent. */
-  onRetry?: (attempt: number) => void;
+  /** The unexplained refusal waits longer: it is a «slow down», not a «wait a second». */
+  vagueBackoffMs?: (attempt: number) => number;
+  /** Called before each extra try, with the tries already spent and what we are waiting on. */
+  onRetry?: (attempt: number, why: RetryReason) => void;
+  /**
+   * Where the item went. Answers with the assetid the inventory holds now, or
+   * null while it is still on its way back.
+   *
+   * Without it the retry is a louder version of the same wrong question — see
+   * the note above `ASSET_RETURNING`.
+   */
+  relocate?: (attempt: number) => Promise<string | null>;
 }
 
 /**
@@ -121,16 +166,29 @@ export async function sellItemWhenReady(
   opts: RelistOptions = {}
 ): Promise<SellResult> {
   const attempts = Math.max(1, opts.attempts ?? 8);
+  const vagueAttempts = Math.max(0, opts.vagueAttempts ?? 2);
   const backoff = opts.backoffMs ?? ((n) => Math.min(2_000 * n, 6_000));
+  const vagueBackoff = opts.vagueBackoffMs ?? ((n) => Math.min(5_000 * n, 20_000));
+  /** The order is re-pointed as the item moves; the caller’s plan is not edited. */
+  const order: SellOrder = { ...plan };
   let spent = 0;
+  let vagueSpent = 0;
   for (;;) {
     try {
-      return await sellItem(plan, pacing);
+      return await sellItem(order, pacing);
     } catch (err) {
       spent += 1;
-      if (spent >= attempts || !assetStillReturning(err) || pacing.abort?.()) throw err;
-      opts.onRetry?.(spent);
-      await sleep(backoff(spent));
+      const returning = assetStillReturning(err);
+      const vague = !returning && sellRefusedVaguely(err);
+      if (vague) vagueSpent += 1;
+      const again = returning ? spent < attempts : vague && vagueSpent <= vagueAttempts;
+      if (!again || pacing.abort?.()) throw err;
+      opts.onRetry?.(spent, vague ? "shrug" : "returning");
+      await sleep(vague ? vagueBackoff(vagueSpent) : backoff(spent));
+      if (opts.relocate) {
+        const fresh = await opts.relocate(spent);
+        if (fresh) order.assetid = fresh;
+      }
     }
   }
 }

@@ -9,6 +9,8 @@ export interface WalletInfo {
   wallet_fee_percent?: number | string;
   wallet_fee_minimum?: number | string;
   wallet_fee_base?: number | string;
+  /** Least the seller may receive on this wallet. Below it Steam refuses the listing. */
+  wallet_market_minimum?: number | string;
   wallet_publisher_fee_percent_default?: number | string;
 }
 

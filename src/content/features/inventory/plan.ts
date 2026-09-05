@@ -1,4 +1,4 @@
-import { buyerPrice, sellerForBuyer, type FeeConfig } from "../../../core/fees";
+import { buyerPrice, minBuyerPrice, sellerForBuyer, type FeeConfig } from "../../../core/fees";
 import { strategyTarget, type SellSettings } from "../../../core/sell";
 import type { Cents } from "../../../core/types";
 import type { InventoryGroup, InventoryItem } from "../../../steam/inventory";
@@ -106,7 +106,19 @@ export function buildSellPlans(input: BuildSellPlansInput): SellPlan[] {
 
       const targetSeller = sellerForBuyer(target.buyer, pub, fees);
       if (targetSeller < 1) {
-        plans.push(skip(item, marketLow, "не собралась цена продавца"));
+        /**
+         * Below the market floor there is no listing to make, and saying so is
+         * the whole point: the search used to answer with a seller amount Steam
+         * refuses, whose floored fees then priced the item *above* the target.
+         */
+        const floor = minBuyerPrice(pub, fees);
+        plans.push(
+          skip(
+            item,
+            marketLow,
+            target.buyer < floor ? "дно рынка — дешевле Steam не примет" : "не собралась цена продавца"
+          )
+        );
         continue;
       }
 

@@ -117,6 +117,14 @@ export function currencyId(): number {
   return ctx.itemPage?.currency || 5;
 }
 
+/**
+ * The language Steam should answer in. `/render/` prices and names its rows by
+ * it, and the classic pages state it outright in `g_strLanguage`.
+ */
+export function language(): string {
+  return ctx.language || "english";
+}
+
 export function country(): string {
   if (ctx.country) return ctx.country;
   const raw = cookie("steamCountry") ?? "";

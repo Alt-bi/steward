@@ -82,6 +82,40 @@ describe("scheduler", () => {
     assert.ok(rate >= 3, `must stay usable, got ${rate}`);
   });
 
+  it("lets one endpoint's web page silence that endpoint and nothing else", async () => {
+    /**
+     * The whole «0 из 10» report. Markup where JSON belongs used to be filed as
+     * `rate_limited`, and one of those opens the breaker for every kind — so
+     * the listing book answering with the market homepage switched off
+     * `priceoverview` and `search`, which are exactly what the run falls back
+     * on when the book dies. Three requests in, the scan had nothing left it
+     * was allowed to ask.
+     */
+    await scheduler.report("listings", "wrong_shape");
+
+    const elsewhere = await scheduler.acquire("price");
+    assert.equal(elsewhere.ok, true, "рыночный минимум обязан остаться спрашиваемым");
+    assert.equal((await scheduler.stats()).blocked, false, "это отказ эндпоинта, а не бан аккаунта");
+
+    const again = await scheduler.acquire("listings");
+    assert.equal(again.ok, false, "и при этом сама книга лотов встаёт на паузу");
+    assert.equal(!again.ok && again.reason, "cooldown");
+  });
+
+  it("still drops the pace of the endpoint that answered with a page", async () => {
+    /** 2.35.0's lesson: filed as a plain error, the pace never dropped. */
+    const before = (await scheduler.stats()).budget.listings.ratePerMin;
+    await scheduler.report("listings", "wrong_shape");
+    const after = (await scheduler.stats()).budget.listings.ratePerMin;
+    assert.ok(after < before, `pace must drop: ${before} -> ${after}`);
+  });
+
+  it("lets the paused endpoint speak again once its pause is over", async () => {
+    await scheduler.report("listings", "wrong_shape");
+    advance(120_000);
+    assert.equal((await scheduler.acquire("listings")).ok, true);
+  });
+
   it("opens the breaker on the first 429, so a scan cannot wait-and-retry into a longer ban", async () => {
     await scheduler.report("price", "rate_limited");
     const blocked = await scheduler.acquire("price");

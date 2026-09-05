@@ -36,30 +36,27 @@ export interface SellSettings {
   maxPerItem: number;
 }
 
+/**
+ * The standard for listing, and the whole of it — these stopped being controls.
+ *
+ * «По минимуму рынка» is the one strategy that needs nothing but the price we
+ * already fetched: the undercut strategies need a step nobody can pick well,
+ * and the averages need `pricehistory`, six requests a minute, for an answer
+ * about a week that has already happened. `undercutCents` and `markupPercent`
+ * are kept because the strategies that read them are still in the planner and
+ * still tested; nothing on screen can select them.
+ *
+ * `maxPerItem` stays a guard rail rather than a preference: a stack of two
+ * hundred is two hundred paced writes, and twenty is where a pass is still a
+ * pass rather than an afternoon.
+ */
 export const DEFAULT_SELL_SETTINGS: SellSettings = {
   strategy: "match",
   undercutCents: 1,
   markupPercent: 10,
   minBuyerCents: 0,
-  maxPerItem: 5,
+  maxPerItem: 20,
 };
-
-export function clampSellSettings(s: Partial<SellSettings>): Partial<SellSettings> {
-  const out: Partial<SellSettings> = { ...s };
-  if (out.undercutCents != null) {
-    out.undercutCents = Math.min(500, Math.max(1, Math.trunc(out.undercutCents) || 1));
-  }
-  if (out.markupPercent != null) {
-    out.markupPercent = Math.min(500, Math.max(-90, Math.trunc(out.markupPercent) || 0));
-  }
-  if (out.minBuyerCents != null) {
-    out.minBuyerCents = Math.max(0, Math.trunc(out.minBuyerCents) || 0);
-  }
-  if (out.maxPerItem != null) {
-    out.maxPerItem = Math.min(100, Math.max(1, Math.trunc(out.maxPerItem) || 1));
-  }
-  return out;
-}
 
 export interface StrategyTarget {
   /** Buyer price before fee rounding; null when the strategy has nothing to go on. */

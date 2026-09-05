@@ -7,7 +7,8 @@ import { calls, jsonReply, reports, resetEnv, setAcquire, setSteam } from "./sup
 
 import { removeListing, sellItem, sellItemWhenReady } from "../src/steam/actions";
 import { SteamError } from "../src/steam/net";
-import { fetchMyListings } from "../src/steam/mylistings";
+import { fetchAssetRefsFor, fetchMyListings } from "../src/steam/mylistings";
+import { pickReturnedAsset } from "../src/steam/inventory";
 import { describeRelistFailure, haltsRun, outcomeUnknown } from "../src/content/ui/errors";
 
 /**
@@ -273,6 +274,42 @@ describe("mylistings walks every page when the account needs them", () => {
     assert.equal(calls.filter((u) => u.includes("mylistings")).length, 2);
   });
 
+  it("stops the walk as soon as the named lots are answered", async () => {
+    /**
+     * The page-scoped scan wants the assets behind the rows it drew, not the
+     * account. A lot on Steam's second page is two requests; the other five
+     * pages of a 700-lot account are the load that buys the penalty box, and
+     * they answer a question nobody asked.
+     */
+    setSteam((url) => {
+      const { start, count } = asksOf(url);
+      return { status: 200, body: JSON.stringify(pageAnswer(start, count, (n) => String(90000000 + n))) };
+    });
+    const page = await fetchAssetRefsFor(["90000101"], {});
+    assert.equal(page.refs.get("90000101")?.assetid, String(40000 + 101));
+    assert.equal(calls.filter((u) => u.includes("mylistings")).length, 2);
+    /** Stopping early is not seeing everything, and it must not claim to be. */
+    assert.equal(page.complete, false);
+  });
+
+  it("asks nothing at all when there is nothing to look up", async () => {
+    setSteam(() => ({ status: 200, body: JSON.stringify(pageAnswer(0, 100, (n) => String(n))) }));
+    const page = await fetchAssetRefsFor([], {});
+    assert.equal(page.refs.size, 0);
+    assert.equal(calls.filter((u) => u.includes("mylistings")).length, 0);
+  });
+
+  it("walks on when Steam simply does not name the lot", async () => {
+    /** An id no page holds is not a reason to stop early — nor to stop late. */
+    setSteam((url) => {
+      const { start, count } = asksOf(url);
+      return { status: 200, body: JSON.stringify(pageAnswer(start, count, (n) => String(90000000 + n))) };
+    });
+    const page = await fetchAssetRefsFor(["nobody"], {});
+    assert.equal(page.refs.has("nobody"), false);
+    assert.equal(calls.filter((u) => u.includes("mylistings")).length, Math.ceil(TOTAL / 100));
+  });
+
   it("passes an interruption through, mid-walk, so the run stops cleanly", async () => {
     let asks = 0;
     setSteam((url) => {
@@ -340,5 +377,167 @@ describe("re-listing after Steam stopped the hand-back", () => {
         err instanceof SteamError && /no longer in your inventory/.test(err.message)
     );
     assert.equal(calls.filter((u) => u.includes("/market/sellitem/")).length, 4);
+  });
+});
+
+/**
+ * The refusal that never stops being true.
+ *
+ * Measured 2026-09-04 on a live account: a lot holding asset `38179473068` was
+ * cancelled, and the same card came back to the inventory as `39042662381`,
+ * marketable and tradable. Steam hands the item back under a **new** assetid.
+ * The retry loop was built for a hand-back that is merely slow, so it asked the
+ * same dead question eight times over thirty seconds and left the lot off the
+ * market — «снят, но НЕ выставлен».
+ */
+describe("a lot whose item came back under a different assetid", () => {
+  const plan = { appid: 753, contextid: "6", assetid: "38179473068", amount: 1, targetSeller: 500 };
+  const noPace = { backoffMs: () => 0 };
+  const GONE =
+    "There was an error processing your request: The item is no longer in your inventory, " +
+    "or it is not tradeable on the Community Market.";
+
+  it("re-finds the item instead of re-sending a dead id" as string, async () => {
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+    const asked: string[] = [];
+    setSteam((url, init) => {
+      const body = String((init as { body?: unknown } | undefined)?.body ?? "");
+      const id = (body.match(/assetid=(\d+)/) ?? [])[1] ?? "";
+      asked.push(id);
+      /** The old id is not slow. It is gone, and it stays gone. */
+      if (id !== "39042662381") return jsonReply({ success: false, message: GONE });
+      return jsonReply({ success: true, jobid: "7" });
+    });
+
+    const result = await sellItemWhenReady(plan, {}, {
+      attempts: 8,
+      ...noPace,
+      relocate: async () => "39042662381",
+    });
+    assert.equal(result.success, true);
+    assert.deepEqual(asked, ["38179473068", "39042662381"], "asked once, then looked");
+  });
+
+  it("keeps waiting while the inventory has not got it yet" as string, async () => {
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+    let tries = 0;
+    setSteam(() => {
+      tries += 1;
+      return tries < 3
+        ? jsonReply({ success: false, message: GONE })
+        : jsonReply({ success: true, jobid: "7" });
+    });
+    /** Null is «still on its way», not «give up on the lot». */
+    const result = await sellItemWhenReady(plan, {}, { attempts: 8, ...noPace, relocate: async () => null });
+    assert.equal(result.success, true);
+    assert.equal(tries, 3);
+  });
+
+  it("never hands the same copy to two lots of one card", () => {
+    const items = [
+      { appid: 753, contextid: "6", assetid: "1", amount: 1, name: "", hash: "Card", type: "", iconUrl: "", marketable: true, tradable: true },
+      { appid: 753, contextid: "6", assetid: "2", amount: 1, name: "", hash: "Card", type: "", iconUrl: "", marketable: true, tradable: true },
+    ];
+    const claimed = new Set<string>();
+    const first = pickReturnedAsset(items, "Card", claimed)!;
+    claimed.add(first);
+    const second = pickReturnedAsset(items, "Card", claimed);
+    assert.notEqual(second, first);
+    claimed.add(second!);
+    assert.equal(pickReturnedAsset(items, "Card", claimed), null, "two copies, two lots, no third");
+  });
+
+  it("prefers the copy that was not lying there before the cancel", () => {
+    const items = [
+      { appid: 753, contextid: "6", assetid: "old", amount: 1, name: "", hash: "Card", type: "", iconUrl: "", marketable: true, tradable: true },
+      { appid: 753, contextid: "6", assetid: "new", amount: 1, name: "", hash: "Card", type: "", iconUrl: "", marketable: true, tradable: true },
+    ];
+    assert.equal(pickReturnedAsset(items, "Card", new Set(), new Set(["old"])), "new");
+  });
+
+  it("will not offer an unmarketable copy", () => {
+    const items = [
+      { appid: 753, contextid: "6", assetid: "1", amount: 1, name: "", hash: "Card", type: "", iconUrl: "", marketable: false, tradable: true },
+    ];
+    assert.equal(pickReturnedAsset(items, "Card", new Set()), null);
+  });
+});
+
+/**
+ * The refusal that names nothing.
+ *
+ * Reported 2026-09-04 from a live run: nineteen lots moved, and the twentieth
+ * came back «Ошибка при выставлении предмета на продажу. Обновите страницу и
+ * повторите попытку.» — Steam's shrug, which covers the listing rate limit and
+ * whatever else it declines to name. Nothing in the retry loop matched it, so
+ * one unexplained answer ended a run of seventy-three with fifty-four lots
+ * never touched.
+ *
+ * The item is in the inventory the whole time, so asking again costs requests
+ * and risks nothing. It is asked again twice, slowly, and then believed.
+ */
+describe("the sell that Steam refuses without saying why", () => {
+  const plan = { appid: 753, contextid: "6", assetid: "9", amount: 1, targetSeller: 500 };
+  const noPace = { backoffMs: () => 0, vagueBackoffMs: () => 0 };
+  const SHRUG = "Ошибка при выставлении предмета на продажу. Обновите страницу и повторите попытку.";
+
+  it("waits it out instead of ending the run", async () => {
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+    let n = 0;
+    setSteam(() => {
+      n += 1;
+      if (n < 3) return jsonReply({ success: false, message: SHRUG });
+      return jsonReply({ success: true, jobid: "7" });
+    });
+    const result = await sellItemWhenReady(plan, {}, noPace);
+    assert.equal(result.success, true);
+    assert.equal(calls.filter((u) => u.includes("/market/sellitem/")).length, 3);
+  });
+
+  it("says which wait the caller is in, so the panel can say it too", async () => {
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+    let n = 0;
+    setSteam(() => {
+      n += 1;
+      return n < 2
+        ? jsonReply({ success: false, message: SHRUG })
+        : jsonReply({ success: true, jobid: "7" });
+    });
+    const why: string[] = [];
+    await sellItemWhenReady(plan, {}, { ...noPace, onRetry: (_n, reason) => why.push(reason) });
+    assert.deepEqual(why, ["shrug"]);
+  });
+
+  it("stops asking, and hands back Steam's own words", async () => {
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+    setSteam(() => jsonReply({ success: false, message: SHRUG }));
+    await assert.rejects(
+      () => sellItemWhenReady(plan, {}, noPace),
+      (err: unknown) => err instanceof SteamError && /Обновите страницу/.test(err.message)
+    );
+    /** The first try plus the two it is worth sitting out. */
+    assert.equal(calls.filter((u) => u.includes("/market/sellitem/")).length, 3);
+  });
+
+  it("re-finds the item between tries, in case that was the problem", async () => {
+    await resetEnv();
+    setAcquire(() => ({ ok: true as const }));
+    let n = 0;
+    const sent: string[] = [];
+    setSteam((url, init) => {
+      if (!url.includes("/market/sellitem/")) return jsonReply({ success: true });
+      n += 1;
+      sent.push(String(new URLSearchParams(String(init?.body ?? "")).get("assetid")));
+      return n < 2
+        ? jsonReply({ success: false, message: SHRUG })
+        : jsonReply({ success: true, jobid: "7" });
+    });
+    await sellItemWhenReady(plan, {}, { ...noPace, relocate: async () => "4242" });
+    assert.deepEqual(sent, ["9", "4242"]);
   });
 });

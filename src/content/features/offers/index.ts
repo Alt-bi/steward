@@ -18,7 +18,6 @@ import {
   type ClassMap,
   type LowMap,
   type OfferFilters,
-  type OfferSortKey,
   type OfferView,
 } from "./view";
 
@@ -44,7 +43,6 @@ interface State {
   classes: ClassMap;
   lows: LowMap;
   filters: OfferFilters;
-  sort: OfferSortKey;
 }
 
 /** Beyond this many unknown items, the cost is worth saying out loud first. */
@@ -119,100 +117,101 @@ async function mount(ctx: FeatureContext): Promise<void> {
     classes: {},
     lows: {},
     filters: { ...DEFAULT_OFFER_FILTERS },
-    sort: "risk",
   };
 
+  /**
+   * The counters, and the two of them that are also the filters.
+   *
+   * «Только живые» and «только с замечаниями» were two tick-boxes naming the
+   * same subsets the numbers above them were already counting. Pressing the
+   * number is the filter, so a whole control row is gone and nothing with it.
+   */
   const stats = el("div", "stw-stats");
   const statNodes: Record<string, HTMLElement> = {};
+  const statButtons: Record<string, HTMLButtonElement> = {};
   for (const [key, label, tone] of [
     ["offers", "обменов", ""],
     ["delta", "баланс", ""],
     ["risky", "тревожных", "warn"],
   ] as const) {
-    const box = el("div", "stw-stat");
+    const box = el("button", "stw-stat") as HTMLButtonElement;
+    box.type = "button";
     if (tone) box.dataset.tone = tone;
+    if (key === "delta") box.classList.add("stw-stat-money");
     const n = el("div", "stw-stat-n", "0");
     box.append(n, el("div", "stw-stat-l", label));
     statNodes[key] = n;
+    statButtons[key] = box;
     stats.appendChild(box);
   }
+
+  statButtons.offers!.title = "Показать всё, включая закрытые обмены";
+  statButtons.offers!.addEventListener("click", () => {
+    state.filters = { ...state.filters, onlyOpen: !state.filters.onlyOpen, onlyFlagged: false };
+    redraw();
+  });
+  statButtons.risky!.title = "Показать только обмены с пометками";
+  statButtons.risky!.addEventListener("click", () => {
+    state.filters = { ...state.filters, onlyFlagged: !state.filters.onlyFlagged };
+    redraw();
+  });
+  statButtons.delta!.disabled = true;
 
   const filterRow = el("div", "stw-controls");
   const queryInput = document.createElement("input");
   queryInput.type = "search";
   queryInput.className = "stw-input";
   queryInput.placeholder = "поиск по нику, номеру, предмету";
-  queryInput.title = "Названия предметов появятся в поиске после «Оценить»";
-
-  const sortSelect = document.createElement("select");
-  sortSelect.className = "stw-select";
-  for (const [value, label] of [
-    ["risk", "сначала тревожные"],
-    ["delta", "сначала выгодные"],
-    ["size", "больше предметов"],
-    ["partner", "по нику"],
-  ] as const) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    sortSelect.appendChild(option);
-  }
-  filterRow.append(queryInput, sortSelect);
-
-  const openLabel = el("label", "stw-toggle");
-  openLabel.title = "Прятать отклонённые, отменённые и истёкшие";
-  const openOnly = document.createElement("input");
-  openOnly.type = "checkbox";
-  openOnly.className = "stw-check";
-  openOnly.checked = true;
-  openLabel.append(openOnly, document.createTextNode(" только живые"));
-
-  const flaggedLabel = el("label", "stw-toggle");
-  flaggedLabel.title = "Только обмены, к которым есть замечания";
-  const flaggedOnly = document.createElement("input");
-  flaggedOnly.type = "checkbox";
-  flaggedOnly.className = "stw-check";
-  flaggedLabel.append(flaggedOnly, document.createTextNode(" только с замечаниями"));
-
-  const toggleRow = el("div", "stw-controls stw-toggles");
-  toggleRow.append(openLabel, flaggedLabel);
+  queryInput.title = "Названия предметов появятся в поиске после «Узнать цены»";
+  filterRow.appendChild(queryInput);
 
   const shownLine = el("div", "stw-hint", "");
 
-  const actions = el("div", "stw-actions");
+  /** Reading the page is where every pass starts, so it gets the width. */
+  const actions = el("div", "stw-actions stw-actions-main");
   const scanBtn = el("button", "stw-btn stw-btn-primary", "Прочитать обмены");
   scanBtn.type = "button";
-  const priceBtn = el("button", "stw-btn", "Оценить");
+  actions.append(scanBtn);
+
+  const actionsRest = el("div", "stw-actions stw-actions-rest");
+  const priceBtn = el("button", "stw-btn stw-btn-go", "Узнать цены");
   priceBtn.type = "button";
-  priceBtn.title = "Узнать, что это за предметы, и сколько они стоят на рынке";
+  priceBtn.title = "Спросить Steam, что это за предметы и сколько они стоят";
   priceBtn.disabled = true;
   const stopBtn = el("button", "stw-btn", "Стоп");
   stopBtn.type = "button";
   stopBtn.disabled = true;
-  actions.append(scanBtn, priceBtn, stopBtn);
+  actionsRest.append(priceBtn, stopBtn);
 
   const rows = el("div", "stw-rows");
-  section.body.append(stats, filterRow, toggleRow, shownLine, actions, rows);
+  section.body.append(stats, filterRow, shownLine, actions, actionsRest, rows);
 
   let phase = "";
   let phaseKind: StatusKind = "";
+  /** What qualifies the answer, folded away under «подробнее». */
+  let phaseDetail = "";
   let pauseUntil = 0;
   let pauseReason: WaitReason = "budget";
 
   function render(): void {
     const left = pauseUntil - Date.now();
     if (left <= 0) {
-      section.setStatus(phase, phaseKind);
+      section.setStatus(phase, phaseKind, phaseDetail);
       return;
     }
     const secs = Math.ceil(left / 1000);
     const note = pauseReason === "cooldown" ? `лимит Steam ${secs}с` : `бюджет запросов ${secs}с`;
-    section.setStatus(`${phase} · ${note}`, pauseReason === "cooldown" ? "warn" : phaseKind);
+    section.setStatus(
+      `${phase} · ${note}`,
+      pauseReason === "cooldown" ? "warn" : phaseKind,
+      phaseDetail
+    );
   }
 
-  function status(text: string, kind: StatusKind = ""): void {
+  function status(text: string, kind: StatusKind = "", detail = ""): void {
     phase = text;
     phaseKind = kind;
+    phaseDetail = detail;
     pauseUntil = 0;
     render();
   }
@@ -227,7 +226,18 @@ async function mount(ctx: FeatureContext): Promise<void> {
   };
 
   function currentViews(): OfferView[] {
-    return viewOffers(state.offers, state.classes, state.lows, state.filters, state.sort);
+    /**
+     * Risk first, always. The other three orders sorted the same rows by the
+     * things the rows already say out loud; this one is the reason the tab
+     * exists — what could go wrong is at the top.
+     */
+    return viewOffers(state.offers, state.classes, state.lows, state.filters, "risk");
+  }
+
+  /** Everything on screen is a view of one list, so it is redrawn as one. */
+  function redraw(): void {
+    renderRows();
+    renderStats();
   }
 
   function renderStats(): void {
@@ -240,9 +250,12 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
     priceBtn.disabled = state.busy || shownClassRefs(views).length === 0;
 
+    statButtons.offers!.setAttribute("aria-pressed", String(!state.filters.onlyOpen));
+    statButtons.risky!.setAttribute("aria-pressed", String(state.filters.onlyFlagged));
+
     shownLine.textContent = state.offers.length
-      ? `Показано ${totals.offers} из ${state.offers.length} · отдаёшь ${totals.gives} предм., ` +
-        `получаешь ${totals.gets}`
+      ? `Отдаёшь ${totals.gives} предм., получаешь ${totals.gets}` +
+        (totals.offers < state.offers.length ? ` · показано ${totals.offers} из ${state.offers.length}` : "")
       : "";
   }
 
@@ -255,7 +268,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
           "stw-empty",
           state.scanned
             ? "Обменов на этой странице нет."
-            : "Открой список обменов и нажми «Прочитать обмены» — беру то, что Steam уже нарисовал."
+            : "Нажми «Прочитать обмены» — беру то, что Steam уже нарисовал."
         )
       );
       return;
@@ -293,20 +306,17 @@ async function mount(ctx: FeatureContext): Promise<void> {
       status(
         asked
           ? "Обменов на странице не видно."
-          : "Жду, пока Steam дорисует список — потом нажми «Прочитать обмены».",
+          : "Жду, пока Steam дорисует список",
         ""
       );
       return;
     }
     const guessed = state.offers.filter((offer) => offer.sideSource === "layout").length;
-    const totals = offerTotals(currentViews());
     status(
-      `Обменов ${state.offers.length}: отдаёшь ${totals.gives} предм., получаешь ${totals.gets}. ` +
-        (guessed
-          ? `У ${guessed} не удалось понять по аватарам, где чья сторона. `
-          : "") +
-        "Запросов не потрачено — нажми «Оценить», чтобы узнать цены.",
-      guessed ? "warn" : "ok"
+      `Обменов ${state.offers.length} · цены ещё не спрашивал`,
+      guessed ? "warn" : "ok",
+      (guessed ? `У ${guessed} не понял по аватарам, где чья сторона. ` : "") +
+        "Запросов не потрачено — нажми «Узнать цены»."
     );
   }
 
@@ -384,18 +394,19 @@ async function mount(ctx: FeatureContext): Promise<void> {
       const tail = unresolved ? ` Про ${unresolved} предм. Steam не ответил.` : "";
 
       if (found.stopped === "blocked" || prices.stopped === "blocked") {
-        status(`Steam остановил оценку — суммы неполные. ${spent}${tail}`, "warn");
+        status("Steam остановил оценку — суммы неполные", "warn", `${spent}${tail}`);
         return;
       }
       if (prices.stopped === "aborted") {
-        status(`Остановлено. ${spent}${tail}`, "");
+        status("Остановлено", "", `${spent}${tail}`);
         return;
       }
       status(
-        (totals.risky
-          ? `Тревожных обменов: ${totals.risky}. Читай пометки в строках. `
-          : "Ничего опасного не вижу. ") + `${spent}${tail}`,
-        totals.risky ? "warn" : "ok"
+        totals.risky
+          ? `Тревожных обменов ${totals.risky} — читай пометки в строках`
+          : "Ничего опасного не вижу",
+        totals.risky ? "warn" : "ok",
+        `${spent}${tail}`
       );
     } catch (err) {
       status(`Оценка: ${describeError(err)}`, "err");
@@ -405,26 +416,8 @@ async function mount(ctx: FeatureContext): Promise<void> {
   }
 
   queryInput.addEventListener("input", () => {
-    state.filters.query = queryInput.value;
-    renderRows();
-    renderStats();
-  });
-
-  sortSelect.addEventListener("change", () => {
-    state.sort = sortSelect.value as OfferSortKey;
-    renderRows();
-  });
-
-  openOnly.addEventListener("change", () => {
-    state.filters.onlyOpen = openOnly.checked;
-    renderRows();
-    renderStats();
-  });
-
-  flaggedOnly.addEventListener("change", () => {
-    state.filters.onlyFlagged = flaggedOnly.checked;
-    renderRows();
-    renderStats();
+    state.filters = { ...state.filters, query: queryInput.value };
+    redraw();
   });
 
   scanBtn.addEventListener("click", () => scan(true));

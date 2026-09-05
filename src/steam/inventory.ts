@@ -370,6 +370,34 @@ export function marketableGroups(groups: Map<string, InventoryGroup>): {
   return { toPrice, skipped };
 }
 
+/**
+ * The copy of `hash` the inventory is holding for us right now.
+ *
+ * Cancelling a listing hands the item back under a **new** assetid — measured
+ * 2026-09-04: `38179473068` went out, `39042662381` came back. So after a
+ * `removelisting` the id the row named is dead, and the only way to put the lot
+ * back is to look the item up again.
+ *
+ * `claimed` is what this run has already re-listed, so two lots of one card do
+ * not both grab the same copy. `known` is what was lying in the inventory
+ * before the cancel: a copy that was not there a moment ago is the one that
+ * just came back, and it is preferred. Copies of one card are interchangeable,
+ * though, so an older one is taken rather than refusing — the listing that
+ * results is the one the owner asked for either way.
+ */
+export function pickReturnedAsset(
+  items: readonly InventoryItem[],
+  hash: string,
+  claimed: ReadonlySet<string>,
+  known: ReadonlySet<string> = new Set()
+): string | null {
+  const fits = items.filter(
+    (item) => item.hash === hash && item.marketable && !claimed.has(item.assetid)
+  );
+  const returned = fits.find((item) => !known.has(item.assetid));
+  return (returned ?? fits[0])?.assetid ?? null;
+}
+
 export async function loadInventory(
   target: InventoryTarget,
   pacing: Pacing & { onProgress?: (loaded: number, total: number) => void }

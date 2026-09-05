@@ -1,7 +1,8 @@
 import "./popup.css";
 
 import { send } from "../core/messaging";
-import { clampSettings, loadSettings, saveSettings, type Settings } from "../core/settings";
+import type { NetStats } from "../core/messaging";
+import { FIXED_SETTINGS } from "../core/settings";
 import { clearHistories } from "../steam/histories";
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -10,24 +11,28 @@ function byId<T extends HTMLElement>(id: string): T {
   return node as T;
 }
 
+const ver = byId<HTMLSpanElement>("ver");
 const openMarket = byId<HTMLButtonElement>("open-market");
-const delay = byId<HTMLInputElement>("delay");
-const undercut = byId<HTMLInputElement>("undercut");
-const concurrency = byId<HTMLInputElement>("concurrency");
-const priceSource = byId<HTMLSelectElement>("price-source");
-const priceTtl = byId<HTMLInputElement>("price-ttl");
-const quickBuy = byId<HTMLInputElement>("quick-buy");
-const onePerItem = byId<HTMLInputElement>("one-per-item");
-const exactLow = byId<HTMLInputElement>("exact-low");
-const netLine = byId<HTMLParagraphElement>("net-line");
+const openFarm = byId<HTMLButtonElement>("open-farm");
+const health = byId<HTMLElement>("health");
+const healthLine = byId<HTMLParagraphElement>("health-line");
+const healthFill = byId<HTMLElement>("health-fill");
+const healthSub = byId<HTMLParagraphElement>("health-sub");
+const standard = byId<HTMLDListElement>("standard");
+const netBudget = byId<HTMLParagraphElement>("net-budget");
 const netLog = byId<HTMLOListElement>("net-log");
 const netReset = byId<HTMLButtonElement>("net-reset");
+
+try {
+  ver.textContent = chrome.runtime.getManifest().version;
+} catch {
+  ver.remove();
+}
 
 openMarket.addEventListener("click", () => {
   void chrome.tabs.create({ url: "https://steamcommunity.com/market/" });
 });
 
-const openFarm = byId<HTMLButtonElement>("open-farm");
 openFarm.addEventListener("click", () => {
   // farm/open reuses an open chat tab (activates it and pushes the hash) —
   // chrome.tabs.create here would pile up duplicate chat tabs, and every
@@ -35,83 +40,96 @@ openFarm.addEventListener("click", () => {
   void send("farm/open", {});
 });
 
-function fill(settings: Settings): void {
-  delay.value = String(settings.delayMs);
-  undercut.value = String(settings.undercutCents);
-  concurrency.value = String(settings.scanConcurrency);
-  priceSource.value = settings.priceSource;
-  priceTtl.value = String(settings.priceTtlMinutes);
-  quickBuy.value = String(settings.quickBuyMaxCents);
-  onePerItem.checked = settings.onePerItem;
-  exactLow.checked = settings.exactCompetitorLow;
+function amount(cents: number): string {
+  return (cents / 100).toFixed(2).replace(".", ",");
 }
 
-/** Numbers are clamped on write, so a typo cannot become a ban-worthy delay. */
-function bindNumber(
-  input: HTMLInputElement,
-  key: "delayMs" | "undercutCents" | "scanConcurrency" | "priceTtlMinutes" | "quickBuyMaxCents"
-): void {
-  input.addEventListener("change", () => {
-    const patch = clampSettings({ [key]: Number.parseInt(input.value, 10) } as Partial<Settings>);
-    const value = patch[key];
-    if (value != null) input.value = String(value);
-    void saveSettings(patch);
-  });
+/**
+ * The standard, read out of the constant rather than typed into the markup.
+ *
+ * The point of the list is that nothing is hidden — a fixed value the owner
+ * cannot see is the same as a value they cannot trust. Reading it from
+ * `FIXED_SETTINGS` is what keeps the promise true: change the number and this
+ * page says the new one, with no second place to forget.
+ */
+function fillStandard(): void {
+  const rows: readonly [string, string][] = [
+    ["Пауза между записями", `${(FIXED_SETTINGS.delayMs / 1000).toFixed(1).replace(".", ",")} с`],
+    ["Ниже конкурента", `${FIXED_SETTINGS.undercutCents} коп.`],
+    ["Глубже не двигаем", `${FIXED_SETTINGS.maxDropPercent}%`],
+    ["Свой лот за конкурента", FIXED_SETTINGS.skipSelfUndercut ? "не считаем" : "считаем"],
+    ["Лотов одного предмета за проход", FIXED_SETTINGS.onePerItem ? "один" : "все"],
+    [
+      "Откуда цены",
+      FIXED_SETTINGS.priceSource === "search" ? "поиск маркета, пачками" : "priceoverview",
+    ],
+    ["Цена свежая", `${FIXED_SETTINGS.priceTtlMinutes} мин`],
+    ["Запросов цен разом", String(FIXED_SETTINGS.scanConcurrency)],
+    ["Точный минимум книги", FIXED_SETTINGS.exactCompetitorLow ? "спрашиваем" : "не спрашиваем"],
+    ["Потолок быстрой покупки", amount(FIXED_SETTINGS.quickBuyMaxCents)],
+  ];
+
+  standard.replaceChildren();
+  for (const [label, value] of rows) {
+    const row = document.createElement("div");
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    row.append(dt, dd);
+    standard.appendChild(row);
+  }
 }
-
-function bindCheck(input: HTMLInputElement, key: "onePerItem" | "exactCompetitorLow"): void {
-  input.addEventListener("change", () => {
-    void saveSettings({ [key]: input.checked } as Partial<Settings>);
-  });
-}
-
-bindNumber(delay, "delayMs");
-bindNumber(undercut, "undercutCents");
-bindNumber(concurrency, "scanConcurrency");
-bindNumber(priceTtl, "priceTtlMinutes");
-bindNumber(quickBuy, "quickBuyMaxCents");
-
-priceSource.addEventListener("change", () => {
-  const value = priceSource.value === "priceoverview" ? "priceoverview" : "search";
-  void saveSettings({ priceSource: value });
-});
-bindCheck(onePerItem, "onePerItem");
-bindCheck(exactLow, "exactCompetitorLow");
 
 function time(ms: number): string {
   return new Date(ms).toLocaleTimeString("ru-RU", { hour12: false });
 }
 
 /**
- * Without this the only thing a stuck scan showed was a countdown, and there was
- * no way to tell a rate limit apart from a login problem or a moved endpoint.
+ * What the numbers mean, said once, in the order that matters.
+ *
+ * A stuck scan used to show a countdown and nothing else, and a rate limit, a
+ * dead session and a moved endpoint all looked identical. The state decides the
+ * colour; the counters go underneath, where they explain rather than announce.
  */
+function verdict(stats: NetStats): { state: string; line: string } {
+  if (stats.blocked) {
+    return {
+      state: "err",
+      line: `Steam отказал ${stats.consecutive429} раз подряд — прогоны стоят`,
+    };
+  }
+  if (stats.cooldownMsLeft > 0) {
+    return { state: "warn", line: `Пауза ${Math.ceil(stats.cooldownMsLeft / 1000)} с` };
+  }
+  if (stats.global.tokens < 1) {
+    return { state: "warn", line: "Запас исчерпан — ждём восстановления" };
+  }
+  return { state: "ok", line: "Steam отвечает" };
+}
+
 async function refreshNet(): Promise<void> {
   try {
     const stats = await send("net/stats", {});
-    const cooldown =
-      stats.cooldownMsLeft > 0 ? ` · пауза ${Math.ceil(stats.cooldownMsLeft / 1000)}с` : "";
-
-    netLine.replaceChildren();
-    netLine.append(
-      `ок ${stats.ok} · 429×${stats.hits429} · пустых ${stats.hitsEmpty}${cooldown}`
-    );
-    const budget = document.createElement("div");
+    const said = verdict(stats);
     const ip = stats.global;
-    budget.textContent =
-      `IP ${ip.tokens}/${ip.capacity} (${ip.ratePerMin}/мин) · ` +
+
+    health.dataset.state = said.state;
+    healthLine.textContent = said.line;
+    healthFill.style.width = `${Math.round(
+      (Math.min(ip.tokens, ip.capacity) / Math.max(1, ip.capacity)) * 100
+    )}%`;
+    healthSub.textContent =
+      `запас ${ip.tokens} из ${ip.capacity}, ${ip.ratePerMin}/мин · ` +
+      `ок ${stats.ok} · отказов ${stats.hits429} · пустых ${stats.hitsEmpty}`;
+
+    netBudget.textContent =
       `поиск ${stats.budget.search.tokens}/${stats.budget.search.capacity} ` +
       `(${stats.budget.search.ratePerMin}/мин) · ` +
       `цены ${stats.budget.price.tokens}/${stats.budget.price.capacity} ` +
-      `(${stats.budget.price.ratePerMin}/мин)`;
-    netLine.append(budget);
-
-    if (stats.blocked) {
-      const flag = document.createElement("div");
-      flag.className = "blocked";
-      flag.textContent = `Steam отказал ${stats.consecutive429} раз подряд — скан остановлен.`;
-      netLine.append(flag);
-    }
+      `(${stats.budget.price.ratePerMin}/мин) · ` +
+      `записи ${stats.budget.write.tokens}/${stats.budget.write.capacity} ` +
+      `(${stats.budget.write.ratePerMin}/мин)`;
 
     const { rows } = await send("log/read", { limit: 40 });
     netLog.replaceChildren();
@@ -123,7 +141,10 @@ async function refreshNet(): Promise<void> {
       netLog.appendChild(li);
     }
   } catch {
-    netLine.textContent = "фоновый процесс ещё не проснулся";
+    health.dataset.state = "idle";
+    healthLine.textContent = "фоновый процесс ещё не проснулся";
+    healthFill.style.width = "0%";
+    healthSub.textContent = "откроется, как только что-нибудь спросит Steam";
   }
 }
 
@@ -140,7 +161,5 @@ netReset.addEventListener("click", () => {
   })();
 });
 
-void (async () => {
-  fill(await loadSettings());
-  await refreshNet();
-})();
+fillStandard();
+void refreshNet();

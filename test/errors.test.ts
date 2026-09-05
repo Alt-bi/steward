@@ -32,8 +32,14 @@ describe("describeRelistFailure", () => {
   it("says outright that the lot came off the market and did not go back", () => {
     const failure = describeRelistFailure("relisting", new SteamError("http", "There was a problem"));
     assert.match(failure.message, /снят, но НЕ выставлен/);
-    assert.match(failure.message, /в инвентаре/);
     assert.match(failure.message, /There was a problem/, "and why, in Steam's own words");
+    /**
+     * And not a word about where the item is. This table never looked; the run
+     * reads the inventory once the write has failed and says what it found, so
+     * an unchecked «предмет в инвентаре» here would be a guess printed in the
+     * one place the owner reads for a fact.
+     */
+    assert.equal(/в инвентаре/.test(failure.message), false, failure.message);
     assert.equal(failure.stranded, true);
   });
 

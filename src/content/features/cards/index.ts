@@ -16,19 +16,19 @@ import { register, type FeatureContext } from "../registry";
 async function mount(ctx: FeatureContext): Promise<void> {
   const section = ctx.panel.addSection("cards", "Карточки");
 
-  const openBtn = el("button", "stw-btn", "Открыть фабрику карточек");
+  /**
+   * One button and one sentence. This page hands off — everything it could
+   * describe about the factory is on the factory's own tab, one click away,
+   * and describing it twice is how the two descriptions start disagreeing.
+   */
+  const row = el("div", "stw-actions stw-actions-main");
+  const openBtn = el("button", "stw-btn stw-btn-primary", "Открыть фабрику");
   openBtn.type = "button";
-  openBtn.title =
-    "Фабрика живёт во вкладке чата - там же, где ходит заявка в Steam: " +
-    "скан бейджей, ротация, журнал дропов.";
+  row.appendChild(openBtn);
 
   section.body.append(
-    el(
-      "p",
-      "stw-hint",
-      "Фарм карточек живёт на странице чата: там же, где ходит заявка в Steam. Фабрика сама считает бейджи и выбивает всё, за что Steam ещё должен карточки - настраивать нечего."
-    ),
-    openBtn
+    el("div", "stw-hint", "Фабрика сама считает бейджи и выбивает всё, за что Steam ещё должен карточки."),
+    row
   );
 
   openBtn.addEventListener("click", () => {
@@ -41,7 +41,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     })();
   });
 
-  section.setStatus("Фабрика карточек - на странице чата");
+  section.setStatus("Фабрика живёт во вкладке чата — там же, где заявка в Steam");
 }
 
 register({

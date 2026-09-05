@@ -116,8 +116,11 @@ register({
     btnClaim.type = "button";
     btnClaim.hidden = true;
 
-    const controls = el("div", "stw-controls");
-    controls.append(btnStart, btnStop, btnRescan, btnClaim);
+    /** Starting is the one thing this tab is for, so it gets the width. */
+    const controls = el("div", "stw-actions stw-actions-main");
+    controls.append(btnStart);
+    const controlsRest = el("div", "stw-actions stw-actions-rest");
+    controlsRest.append(btnStop, btnRescan, btnClaim);
 
     const stats = el("div", "stw-stats");
     const statsNodes: Record<string, HTMLElement> = {};
@@ -153,13 +156,14 @@ register({
     const logWrap = el("div", "stw-farm-log");
 
     section.body.append(
-      el(
-        "p",
-        "stw-hint",
-        `Фармятся все игры, за которые Steam ещё должен карточки — до ${FARM_MAX} штук разом, выбитые сменяются следующими. Вкладку чата держи открытой: заявка живёт в ней.`
-      ),
       stats,
+      el(
+        "div",
+        "stw-hint",
+        `До ${FARM_MAX} игр разом, выбитые сменяются следующими. Вкладку чата держи открытой: заявка живёт в ней.`
+      ),
       controls,
+      controlsRest,
       prog,
       wire,
       rowsWrap,
@@ -196,11 +200,15 @@ register({
     }
 
     /** The status line for whatever the factory is doing right now. */
-    function statusFor(state: FarmState, leaderBlocked: boolean): [string, StatusKind] {
+    function statusFor(
+      state: FarmState,
+      leaderBlocked: boolean
+    ): [string, StatusKind, string?] {
       if (leaderBlocked) {
         return [
-          "Фабрику ведёт другая вкладка чата. Это пройдёт само: живая вкладка заявляет о себе каждые 10 секунд, мёртвая освобождает фабрику за ~30. Хочешь сейчас — «Забрать себе».",
+          "Фабрику ведёт другая вкладка чата",
           "warn",
+          "Живая вкладка заявляет о себе каждые 10 секунд, мёртвая освобождает фабрику примерно за 30. Нужно прямо сейчас — «Забрать себе».",
         ];
       }
       if (state.running) {
@@ -221,7 +229,7 @@ register({
       }
       if (state.playing.length) return [`Пауза: ${state.playing.length} игр заявлено, ротация стоит`, ""];
       if (scanRows.length) return [`Готово к старту: ${scanRows.length} игр ещё должны карточек`, ""];
-      return ["Жми «Старт» — фабрика сама посчитает бейджи и займётся всем, где остались дропы", ""];
+      return ["Жми «Старт» — фабрика сама всё посчитает и займётся дропами", ""];
     }
 
     function render(state: FarmState, leaderBlocked: boolean): void {
@@ -231,8 +239,8 @@ register({
       btnRescan.disabled = busy || leaderBlocked;
       btnClaim.hidden = !leaderBlocked;
 
-      const [text, kind] = statusFor(state, leaderBlocked);
-      setStatus(text, kind);
+      const [text, kind, detail] = statusFor(state, leaderBlocked);
+      setStatus(text, kind, detail);
 
       statsNodes.playing!.textContent = String(state.playing.length);
       statBoxes.playing!.dataset.tone = state.playing.length ? "go" : "";

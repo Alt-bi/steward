@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { buyerPrice, DEFAULT_FEES, feesFromWallet, sellerForBuyer } from "../src/core/fees";
+import { buyerPrice, DEFAULT_FEES, feesFromWallet, minBuyerPrice, sellerForBuyer } from "../src/core/fees";
 
 const fees = DEFAULT_FEES;
 
@@ -68,5 +68,57 @@ describe("feesFromWallet", () => {
     assert.deepEqual(feesFromWallet(null), DEFAULT_FEES);
     const broken = feesFromWallet({ wallet_fee_percent: "nonsense" });
     assert.equal(broken.steamPercent, DEFAULT_FEES.steamPercent);
+  });
+});
+
+/**
+ * The RUB wallet, as it answered on 2026-09-03, and the ten lots it priced.
+ *
+ * This is here because the arithmetic was wrong for five of those ten and the
+ * mistake was invisible: the publisher cut was floored at 1 kopeck instead of
+ * at the wallet’s own minimum, so every card sitting on the market floor was
+ * read as 1,82 ₽ when Steam shows 2,61 ₽ — and the reprice it computed from
+ * that would have listed the lot *higher* while reporting a cut.
+ */
+describe("a RUB wallet, measured", () => {
+  const rub = feesFromWallet({
+    wallet_currency: 5,
+    wallet_fee_percent: "0.05",
+    wallet_fee_minimum: "87",
+    wallet_fee_base: "0",
+    wallet_market_minimum: "87",
+    wallet_publisher_fee_percent_default: "0.10",
+  });
+
+  it("reads the floor Steam refuses to go below", () => {
+    assert.equal(rub.steamMinimum, 87);
+    assert.equal(rub.marketMinimum, 87);
+  });
+
+  it("prices the market floor at 2,61, the way the page shows it", () => {
+    assert.equal(buyerPrice(87, 0.1, rub), 261, "87 + 87 + 87, both cuts floored");
+    assert.equal(minBuyerPrice(0.1, rub), 261);
+  });
+
+  it("prices the lots above the floor exactly as the page shows them", () => {
+    /** Every one of these was read off /market on the day. */
+    for (const [seller, buyer] of [
+      [7068, 8127],
+      [2429, 2792],
+      [7598, 8736],
+      [53845, 61921],
+      [7863, 9042],
+    ] as const) {
+      assert.equal(buyerPrice(seller, 0.1, rub), buyer, `${seller} -> ${buyer}`);
+    }
+  });
+
+  it("refuses to invent a price under the floor instead of quietly raising it", () => {
+    /**
+     * The old search answered 158 here: a listing Steam prices at 3,32 in
+     * answer to «поставь 2,60». Refusing is the only honest answer.
+     */
+    assert.equal(sellerForBuyer(260, 0.1, rub), 0);
+    assert.equal(sellerForBuyer(261, 0.1, rub), 87);
   });
 });

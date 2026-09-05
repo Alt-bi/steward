@@ -18,7 +18,16 @@ export type NetKind =
   | "badges"
   | "write";
 
-export type NetOutcome = "ok" | "rate_limited" | "empty" | "error";
+/**
+ * How one request ended, as the governor needs to hear it.
+ *
+ * `wrong_shape` is markup where JSON belongs — a refusal by one endpoint, not
+ * a limit on the IP. It used to be filed as `rate_limited`, and since one
+ * `rate_limited` opens the breaker for every kind, the very first homepage from
+ * the listing book switched off the price endpoints that exist to rescue that
+ * exact run. Same refusal, different blast radius.
+ */
+export type NetOutcome = "ok" | "rate_limited" | "wrong_shape" | "empty" | "error";
 
 export interface KindBudget {
   /** Whole requests available right now. */

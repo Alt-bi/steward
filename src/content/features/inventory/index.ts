@@ -1,9 +1,8 @@
 import { formatCents } from "../../../core/money";
-import { csvDoc, downloadCsv } from "../../../core/csv";
-import { loadSettings, saveSettings, type Settings } from "../../../core/settings";
-import { clampSellSettings, type SellStrategy } from "../../../core/sell";
+import { humanMinutes } from "../../../core/duration";
+import { loadSettings, type Settings } from "../../../core/settings";
 import type { Cents, ItemKeyed } from "../../../core/types";
-import { needsConfirmation, sellItem } from "../../../steam/actions";
+import { needsConfirmation, sellItemWhenReady } from "../../../steam/actions";
 import {
   appidFromHash,
   contextsFromPage,
@@ -38,7 +37,7 @@ import {
 } from "../../../steam/page-context";
 import { fetchMarketLows } from "../../../steam/prices";
 import { fetchWear, wearChip, type WearInfo } from "../../../steam/floats";
-import { el, field, narrowField, type StatusKind } from "../../ui/panel";
+import { el, type StatusKind } from "../../ui/panel";
 import { describeError, haltsRun, outcomeUnknown } from "../../ui/errors";
 import { register, type FeatureContext } from "../registry";
 import {
@@ -49,9 +48,6 @@ import {
   watchForRepaint,
   watchTilePicks,
 } from "./badges";
-import { defaultAsk, loadHistories } from "../../../steam/history-load";
-import type { HistoryStats } from "../../../steam/pricehistory";
-import { needsHistory } from "../../../core/sell";
 import { buildSellPlans, plannedProceeds, type SellPlan } from "./plan";
 import {
   DEFAULT_FILTERS,
@@ -85,7 +81,6 @@ interface State {
   groups: Map<string, InventoryGroup>;
   lows: Record<string, Cents | null>;
   /** Group key -> what the item has been selling for. Only «по средней» needs it. */
-  stats: Record<string, HistoryStats | null>;
   unresolved: ItemKeyed[];
   plans: SellPlan[];
   /**
@@ -106,6 +101,33 @@ interface State {
   wears: Map<string, WearInfo>;
 }
 
+/**
+ * How long a batch of listings takes, in milliseconds.
+ *
+ * One paced `sellitem` per copy against a budget of eight writes a minute, plus
+ * the pause the run puts after each. Two hundred copies is not «a moment»; it is
+ * most of an hour, and that number belongs in the question rather than in the
+ * scroll bar afterwards.
+ */
+const WRITE_BUDGET_PER_MIN = 8;
+
+export function runTimeMs(copies: number, delayMs = 2500): number {
+  return copies * (60_000 / WRITE_BUDGET_PER_MIN + Math.max(0, delayMs));
+}
+
+
+/** The worst price in a batch, as a percentage under the market minimum. */
+export function deepestCut(plans: readonly SellPlan[]): number {
+  let worst = 0;
+  for (const plan of plans) {
+    if (plan.action !== "sell" || plan.targetBuyer == null) continue;
+    const low = plan.marketLow;
+    if (low == null || low < 1 || plan.targetBuyer >= low) continue;
+    worst = Math.max(worst, Math.round(((low - plan.targetBuyer) / low) * 100));
+  }
+  return worst;
+}
+
 function money(cents: Cents | null | undefined): string {
   return formatCents(cents, currencyId());
 }
@@ -119,7 +141,6 @@ async function mount(ctx: FeatureContext): Promise<void> {
     settings: ctx.settings,
     groups: new Map(),
     lows: {},
-    stats: {},
     unresolved: [],
     plans: [],
     selection: emptySelection(),
@@ -129,82 +150,51 @@ async function mount(ctx: FeatureContext): Promise<void> {
     wears: new Map(),
   };
 
+  /**
+   * The counters, and the one of them that is also a filter.
+   *
+   * «продаваемые» and «с ценой» were two checkboxes hiding the same thing twice:
+   * rows the market will not take and rows we could not price are both rows that
+   * cannot be listed. That is what «к продаже» counts, so pressing the counter
+   * is the filter — a row of controls removed and nothing lost.
+   */
   const stats = el("div", "stw-stats");
   const statNodes: Record<string, HTMLElement> = {};
+  const statButtons: Record<string, HTMLButtonElement> = {};
   for (const [key, label, tone] of [
     ["items", "предметов", ""],
     ["value", "на сумму", "warn"],
-    ["sell", "к продаже", ""],
+    ["sell", "к продаже", "go"],
   ] as const) {
-    const box = el("div", "stw-stat");
+    const box = el("button", "stw-stat") as HTMLButtonElement;
+    box.type = "button";
     if (tone) box.dataset.tone = tone;
+    if (key === "value") box.classList.add("stw-stat-money");
     const n = el("div", "stw-stat-n", "0");
     box.append(n, el("div", "stw-stat-l", label));
     statNodes[key] = n;
+    statButtons[key] = box;
     stats.appendChild(box);
   }
 
-  /** Which game to read. Populated from the page, not from the URL fragment. */
-  const gameRow = el("div", "stw-controls");
-  const gameSelect = document.createElement("select");
-  gameSelect.className = "stw-select";
-  gameRow.appendChild(field("Игра", gameSelect, "Что читать: инвентарь выбранной игры"));
-
-  /** Strategy lives in the panel because it is changed per pass, not once. */
-  const controls = el("div", "stw-controls");
-  const strategySelect = document.createElement("select");
-  strategySelect.className = "stw-select";
-  for (const [value, label] of [
-    ["match", "по минимуму рынка"],
-    ["undercut", "ниже минимума"],
-    ["markup", "выше минимума"],
-    ["avg7", "по средней за неделю"],
-    ["avg30", "по средней за месяц"],
-    ["avg365", "по средней за год"],
-  ] as const) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    strategySelect.appendChild(option);
+  /** Only the rows that can actually be listed, or everything. */
+  function onlySellable(): boolean {
+    return state.filters.onlyMarketable && state.filters.onlyPriced;
   }
-
-  const amountInput = document.createElement("input");
-  amountInput.type = "number";
-  amountInput.className = "stw-num";
-  amountInput.min = "1";
-  amountInput.title = "Насколько ниже (коп.) или выше (%)";
-
-  const perItemInput = document.createElement("input");
-  perItemInput.type = "number";
-  perItemInput.className = "stw-num";
-  perItemInput.min = "1";
-  perItemInput.max = "100";
-  perItemInput.title = "Сколько штук одного предмета за проход";
-
-  /**
-   * The average strategies need the sale history, which is the slowest thing Steam
-   * serves. It is a separate button on purpose: nothing here starts a five-minute
-   * run because a dropdown changed.
-   */
-  const historyBtn = el("button", "stw-btn stw-btn-thin", "История продаж");
-  historyBtn.type = "button";
-  historyBtn.title =
-    "Нужна для «по средней». Самый медленный запрос Steam — около 6 в минуту, " +
-    "зато ответ живёт часами.";
-
-    const csvBtn = el("button", "stw-btn stw-btn-thin", "CSV");
-  csvBtn.type = "button";
-  csvBtn.title =
-    "Сохранить то, что видно, таблицей: предмет, кол-во, цена, износ. Открывается в Excel.";
-  csvBtn.addEventListener("click", () => exportCsv());
-
-  controls.append(
-    field("Стратегия", strategySelect, "Как считать цену выставления"),
-    narrowField("Шаг", amountInput, amountInput.title),
-    narrowField("Штук", perItemInput, perItemInput.title),
-    historyBtn,
-    csvBtn
-  );
+  statButtons.sell!.title = "Показать только то, что можно выставить";
+  statButtons.sell!.addEventListener("click", () => {
+    const on = !onlySellable();
+    state.filters = { ...state.filters, onlyMarketable: on, onlyPriced: on };
+    renderRows();
+    renderStats();
+  });
+  statButtons.items!.title = "Показать всё, что нашлось на странице";
+  statButtons.items!.addEventListener("click", () => {
+    state.filters = { ...state.filters, onlyMarketable: false, onlyPriced: false };
+    renderRows();
+    renderStats();
+  });
+  statButtons.value!.disabled = true;
 
   /**
    * Filtering and sorting are what turn a page of two hundred stacks into a
@@ -217,64 +207,32 @@ async function mount(ctx: FeatureContext): Promise<void> {
   queryInput.placeholder = "поиск по названию";
   queryInput.title = "Ищет и по названию, и по market_hash_name — там живёт износ";
 
-  const sortSelect = document.createElement("select");
-  sortSelect.className = "stw-select";
-  for (const [value, label] of [
-    ["value", "дороже стопкой"],
-    ["price", "дороже за штуку"],
-    ["count", "больше штук"],
-    ["name", "по названию"],
-    ["wear", "меньше износ (float)"],
-  ] as const) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = label;
-    sortSelect.appendChild(option);
-  }
-  filterRow.append(
-    field("Фильтр", queryInput, queryInput.title),
-    field("Сортировка", sortSelect)
-  );
+  /**
+   * One order, and it is the one a seller wants: the stack worth the most on
+   * top, the unpriced at the bottom. Five ways to sort a list is five ways to
+   * be looking at the wrong end of it.
+   *
+   * The box carries no label: «Фильтр» over a field whose placeholder already
+   * reads «поиск по названию» is a caption for a photograph of itself.
+   */
+  filterRow.appendChild(queryInput);
 
-  function checkbox(text: string, title: string): { label: HTMLElement; input: HTMLInputElement } {
-    const label = el("label", "stw-toggle");
-    label.title = title;
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.className = "stw-check";
-    label.append(input, document.createTextNode(` ${text}`));
-    return { label, input };
-  }
+  const hint = el("div", "stw-hint", "Ctrl+клик по плитке — снять или вернуть одну копию");
 
-  const marketableOnly = checkbox("продаваемые", "Скрыть то, что маркет не примет");
-  const pricedOnly = checkbox("с ценой", "Скрыть то, чему не нашлась цена");
-
-  const pickAllBtn = el("button", "stw-btn stw-btn-thin", "Все");
-  pickAllBtn.type = "button";
-  pickAllBtn.title = "Отметить всё, что сейчас показано";
-  const pickNoneBtn = el("button", "stw-btn stw-btn-thin", "Ничего");
-  pickNoneBtn.type = "button";
-  pickNoneBtn.title = "Снять отметку со всего, что сейчас показано";
-
-  const toggleRow = el("div", "stw-controls stw-toggles");
-  toggleRow.append(marketableOnly.label, pricedOnly.label, pickAllBtn, pickNoneBtn);
-
-  const hint = el(
-    "div",
-    "stw-hint",
-    "Ctrl+клик по плитке в инвентаре — снять или вернуть одну копию"
-  );
-
-  const actions = el("div", "stw-actions");
+  /** Scanning is where every pass starts, so it gets the width. */
+  const actions = el("div", "stw-actions stw-actions-main");
   const scanBtn = el("button", "stw-btn stw-btn-primary", "Оценить страницу");
   scanBtn.type = "button";
+  actions.append(scanBtn);
+
+  const actionsRest = el("div", "stw-actions stw-actions-rest");
   const sellBtn = el("button", "stw-btn stw-btn-go", "Выставить");
   sellBtn.type = "button";
   sellBtn.disabled = true;
   const stopBtn = el("button", "stw-btn", "Стоп");
   stopBtn.type = "button";
   stopBtn.disabled = true;
-  actions.append(scanBtn, sellBtn, stopBtn);
+  actionsRest.append(sellBtn, stopBtn);
 
   const resumeRow = el("div", "stw-actions stw-resume");
   const resumeBtn = el("button", "stw-btn stw-btn-primary", "Догрузить цены");
@@ -283,27 +241,40 @@ async function mount(ctx: FeatureContext): Promise<void> {
   resumeRow.hidden = true;
 
   const rows = el("div", "stw-rows");
-  section.body.append(stats, gameRow, controls, filterRow, toggleRow, hint, actions, resumeRow, rows);
+  section.body.append(stats, filterRow, hint, actions, actionsRest, resumeRow, rows);
 
   let phase = "";
   let phaseKind: StatusKind = "";
+  /**
+   * The caveats, folded away under «подробнее».
+   *
+   * A finished scan has one answer and three footnotes — how many requests it
+   * spent, what to do about the unpriced, what to press next. Printed as one
+   * paragraph they bury the answer, which is the only line most passes need.
+   */
+  let phaseDetail = "";
   let pauseUntil = 0;
   let pauseReason: WaitReason = "budget";
 
   function render(): void {
     const left = pauseUntil - Date.now();
     if (left <= 0) {
-      section.setStatus(phase, phaseKind);
+      section.setStatus(phase, phaseKind, phaseDetail);
       return;
     }
     const secs = Math.ceil(left / 1000);
     const note = pauseReason === "cooldown" ? `лимит Steam ${secs}с` : `бюджет запросов ${secs}с`;
-    section.setStatus(`${phase} · ${note}`, pauseReason === "cooldown" ? "warn" : phaseKind);
+    section.setStatus(
+      `${phase} · ${note}`,
+      pauseReason === "cooldown" ? "warn" : phaseKind,
+      phaseDetail
+    );
   }
 
-  function status(text: string, kind: StatusKind = ""): void {
+  function status(text: string, kind: StatusKind = "", detail = ""): void {
     phase = text;
     phaseKind = kind;
+    phaseDetail = detail;
     pauseUntil = 0;
     render();
   }
@@ -316,68 +287,6 @@ async function mount(ctx: FeatureContext): Promise<void> {
       render();
     },
   };
-
-  let choices: InventoryChoice[] = [];
-
-  function choiceValue(choice: InventoryChoice): string {
-    return `${choice.appid}_${choice.contextid}`;
-  }
-
-  /** Keeps the picker in step with the page, preserving what the user selected. */
-  function fillGames(): void {
-    const previous = gameSelect.value;
-    choices = contextsFromPage(appContexts());
-    gameSelect.replaceChildren();
-
-    if (!choices.length) {
-      const option = document.createElement("option");
-      option.value = "";
-      option.textContent = "игры не видны — обнови страницу";
-      gameSelect.appendChild(option);
-      gameSelect.disabled = true;
-      return;
-    }
-
-    gameSelect.disabled = false;
-    for (const choice of choices) {
-      const option = document.createElement("option");
-      option.value = choiceValue(choice);
-      option.textContent = `${choice.label} · ${choice.count}`;
-      gameSelect.appendChild(option);
-    }
-
-    /**
-     * Whatever the user is actually looking at wins over our own default. The
-     * fragment is sometimes `#730_2` and sometimes just `#227300`, so both the
-     * full form and the appid alone are honoured.
-     */
-    const fromHash = targetFromHash(location.hash, "x");
-    const appidOnly = appidFromHash(location.hash);
-    const byAppid = appidOnly ? choices.find((c) => c.appid === appidOnly) : undefined;
-
-    const wanted =
-      (previous && choices.some((c) => choiceValue(c) === previous) && previous) ||
-      (fromHash && `${fromHash.appid}_${fromHash.contextid}`) ||
-      (byAppid && choiceValue(byAppid)) ||
-      choiceValue(choices[0]!);
-    if (choices.some((c) => choiceValue(c) === wanted)) gameSelect.value = wanted;
-  }
-
-  function selectedChoice(): InventoryChoice | null {
-    return choices.find((c) => choiceValue(c) === gameSelect.value) ?? choices[0] ?? null;
-  }
-
-  function fillControls(): void {
-    strategySelect.value = state.settings.sell.strategy;
-    amountInput.value = String(
-      state.settings.sell.strategy === "markup"
-        ? state.settings.sell.markupPercent
-        : state.settings.sell.undercutCents
-    );
-    amountInput.disabled = state.settings.sell.strategy !== "undercut" && state.settings.sell.strategy !== "markup";
-    historyBtn.hidden = !needsHistory(state.settings.sell.strategy);
-    perItemInput.value = String(state.settings.sell.maxPerItem);
-  }
 
   function pendingSells(): SellPlan[] {
     return state.plans.filter((p) => p.action === "sell" && p.result !== "ok");
@@ -415,9 +324,48 @@ async function mount(ctx: FeatureContext): Promise<void> {
     const todo = pendingSells().length;
     sellBtn.textContent = todo ? `Выставить ${todo}` : "Выставить";
     sellBtn.disabled = state.busy || todo === 0;
+
+    const only = onlySellable();
+    statButtons.sell!.setAttribute("aria-pressed", String(only));
+    statButtons.items!.setAttribute("aria-pressed", String(!only));
   }
 
-  function groupRow(view: GroupView): HTMLElement {
+  /**
+   * What this pass will actually do with one stack.
+   *
+   * Built once per render rather than searched per row: the plan list is one
+   * entry per copy, so a page of two hundred stacks would otherwise scan it two
+   * hundred times over.
+   */
+  interface GroupOrder {
+    /** Copies this pass would list. */
+    count: number;
+    /** What one copy would be listed at — the price a buyer pays. */
+    buyer: Cents | null;
+    /** What lands in the wallet for all of them, fees already taken. */
+    take: Cents;
+    /** Why nothing is planned, in the planner's own words. */
+    reason: string;
+  }
+
+  function ordersByGroup(): Map<string, GroupOrder> {
+    const out = new Map<string, GroupOrder>();
+    for (const plan of state.plans) {
+      const key = `${plan.appid}	${plan.hash}`;
+      const seen = out.get(key) ?? { count: 0, buyer: null, take: 0, reason: "" };
+      if (plan.action === "sell" && plan.result !== "ok") {
+        seen.count += 1;
+        if (seen.buyer == null) seen.buyer = plan.targetBuyer;
+        if (plan.targetSeller != null) seen.take += plan.targetSeller;
+      } else if (!seen.reason && plan.action === "skip") {
+        seen.reason = plan.reason;
+      }
+      out.set(key, seen);
+    }
+    return out;
+  }
+
+  function groupRow(view: GroupView, order: GroupOrder): HTMLElement {
     const { group, low } = view;
     const row = el("div", "stw-row stw-row-pick");
     row.dataset.key = group.key;
@@ -441,24 +389,69 @@ async function mount(ctx: FeatureContext): Promise<void> {
     label.append(check, document.createTextNode(` ${group.name}`));
     label.title = group.hash;
 
+    /**
+     * The two numbers a seller is deciding between, in the column where the
+     * reprice tab puts them: what the market asks, and what we would ask.
+     *
+     * It used to read «×12 · 1 234,56» — the count and what the stack is worth
+     * at market. Neither is the decision. The stack's worth is already in the
+     * counter above, while the price this pass will list at was computed, used,
+     * and never shown: with «ниже минимума» or «по средней за год» it can sit
+     * well under the market low, and that gap was invisible until the confirm
+     * dialog. Now it is a number, and a coloured one past twelve percent.
+     */
     const prices = el("div", "stw-prices");
-    prices.append(
-      el("span", "stw-our", `×${group.count}`),
-      el("span", "stw-arrow", "·"),
+    if (low == null) {
+      prices.append(el("span", "stw-tgt stw-muted", "—"));
+    } else if (order.buyer === low) {
+      /**
+       * «По минимуму рынка» usually lands exactly on the minimum, and an arrow
+       * between two identical numbers asks the reader to compare them. The fee
+       * round-trip does move it by a kopeck sometimes — that is when the arrow
+       * has something to say, and only then does it appear.
+       */
+      prices.append(el("span", "stw-tgt", money(order.buyer)));
+    } else if (order.buyer != null) {
+      prices.append(
+        el("span", "stw-our", money(low)),
+        el("span", "stw-arrow", "→"),
+        el("span", "stw-tgt", money(order.buyer))
+      );
+      const cut = low > 0 && order.buyer < low ? Math.round(((low - order.buyer) / low) * 100) : 0;
+      if (cut > 0) {
+        const chip = el("span", "stw-drop", `−${cut}%`);
+        chip.dataset.deep = cut >= 30 ? "hard" : cut >= 12 ? "some" : "easy";
+        prices.appendChild(chip);
+      }
+    } else {
+      prices.append(el("span", "stw-tgt stw-muted", money(low)));
+    }
+    prices.title =
       low == null
-        ? el("span", "stw-tgt stw-muted", "—")
-        : el("span", "stw-tgt", money(view.value))
-    );
+        ? "цена не получена"
+        : `${group.count} шт · по рынку стопка стоит ${money(view.value)}`;
 
     const picked = sellable ? pickedInGroup(group) : 0;
     const wear = wearOf(group);
-    const why =
-      low == null
-        ? "цена не получена"
-        : `${money(low)} за штуку` +
-          (view.sellable < group.count ? ` · продаётся ${view.sellable} из ${group.count}` : "") +
-          (pick === "some" ? ` · выбрано ${picked} из ${view.sellable}` : "") +
-          (wear ? ` · ${wear}` : "");
+    /**
+     * One clamped line, so what goes first is the whole design: the money that
+     * arrives if this sells. «Получим за вычетом комиссии» lived only in the
+     * confirm dialog, which is the last place a decision can still be changed
+     * and the worst place to learn a new number.
+     */
+    const said: string[] = [];
+    if (low == null) {
+      said.push("цена не получена");
+    } else if (order.count > 0) {
+      said.push(`${order.count} шт · тебе будет ${money(order.take)}`);
+      if (order.count < view.sellable) said.push(`из ${view.sellable} продаваемых`);
+    } else {
+      said.push(order.reason || "выставлять нечего");
+    }
+    if (view.sellable < group.count) said.push(`продаётся ${view.sellable} из ${group.count}`);
+    if (pick === "some" && order.count === 0) said.push(`выбрано ${picked} из ${view.sellable}`);
+    if (wear) said.push(wear);
+    const why = said.join(" · ");
 
     /** One stack, one click, without disturbing the rest of the selection. */
     const quick = el("button", "stw-btn stw-btn-thin", "продать");
@@ -467,43 +460,20 @@ async function mount(ctx: FeatureContext): Promise<void> {
     quick.title = "Выставить только этот предмет";
     quick.addEventListener("click", () => void quickSell(group));
 
+    const whyLine = el("div", "stw-why", why);
+    whyLine.title = why;
     const whyRow = el("div", "stw-whyrow");
-    whyRow.append(el("div", "stw-why", why), quick);
+    whyRow.append(whyLine, quick);
 
     row.append(label, prices, whyRow);
     return row;
-  }
-
-  /**
-   * What the user can see, as a spreadsheet — the filter and sort already ran,
-   * the export is the table, not the raw scan.
-   */
-  function exportCsv(): void {
-    const views = currentViews();
-    if (!views.length) {
-      status("Экспортировать нечего — сначала «Сканировать».", "warn");
-      return;
-    }
-    const rows = views.map((view) => [
-      view.group.name,
-      view.group.hash,
-      view.group.count,
-      money(view.low),
-      money(view.value),
-      wearOf(view.group),
-    ]);
-    downloadCsv(
-      `steward-inventory-${new Date().toISOString().slice(0, 10)}.csv`,
-      csvDoc(["Предмет", "market_hash_name", "Копий", "Низ рынка", "Стек стоит", "Wear"], rows)
-    );
-    status(`CSV: ${views.length} строк выгружено.`, "ok");
   }
 
   function renderRows(): void {
     rows.replaceChildren();
     if (!state.groups.size) {
       rows.appendChild(
-        el("div", "stw-empty", "Оценю предметы, которые Steam уже нарисовал в сетке. Перелистни инвентарь и нажми снова, чтобы взять следующие.")
+        el("div", "stw-empty", "Нажми «Оценить страницу» — посчитаю то, что Steam уже нарисовал в сетке.")
       );
       return;
     }
@@ -512,7 +482,11 @@ async function mount(ctx: FeatureContext): Promise<void> {
       rows.appendChild(el("div", "stw-empty", "Под фильтр ничего не подошло."));
       return;
     }
-    for (const view of views) rows.appendChild(groupRow(view));
+    const orders = ordersByGroup();
+    const nothing: GroupOrder = { count: 0, buyer: null, take: 0, reason: "" };
+    for (const view of views) {
+      rows.appendChild(groupRow(view, orders.get(view.group.key) ?? nothing));
+    }
   }
 
   function setBusy(busy: boolean): void {
@@ -597,7 +571,6 @@ async function mount(ctx: FeatureContext): Promise<void> {
       lows: state.lows,
       settings: state.settings.sell,
       fees: feeConfig(),
-      stats: state.stats,
       onlyAssets: pickedAssets(),
     });
     renderRows();
@@ -605,10 +578,8 @@ async function mount(ctx: FeatureContext): Promise<void> {
     repaintBadges();
     const todo = pendingSells();
     if (todo.length) {
-      status(
-        `${todo.length} к выставлению, получим ${money(plannedProceeds(todo))} за вычетом комиссии.`,
-        "warn"
-      );
+      /** A plan that came out as asked is not a warning; amber was crying wolf. */
+      status(`К выставлению ${todo.length} · тебе будет ${money(plannedProceeds(todo))}`, "ok");
     }
   }
 
@@ -634,78 +605,23 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
     if (result.stopped === "blocked") {
       status(
-        `Steam отказал. Оценено ${totals.priced} из ${state.groups.size} на ${money(totals.total)}. ` +
-          `Не жми «Догрузить», пока маркет в этой вкладке сам не открывается — бан от повторных запросов растягивается до часов. ${spent}`,
-        "warn"
+        `Steam отказал · оценено ${totals.priced} из ${state.groups.size} на ${money(totals.total)}`,
+        "warn",
+        "Не жми «Догрузить цены», пока маркет в этой вкладке сам не открывается: " +
+          `бан от повторных запросов растягивается до часов. ${spent}`
       );
       return;
     }
     if (result.stopped === "aborted") {
-      status(`Остановлено. Оценено ${totals.priced} из ${state.groups.size}. ${spent}`, "");
+      status(`Остановлено · оценено ${totals.priced} из ${state.groups.size}`, "", spent);
       return;
     }
     status(
       `На экране на ${money(totals.total)}` +
-        (totals.unpriced ? `, без цены ${totals.unpriced}` : "") +
-        `. Перелистни сетку и оцени снова, чтобы взять следующие. ${spent}`,
-      "ok"
+        (totals.unpriced ? ` · без цены ${totals.unpriced}` : ""),
+      "ok",
+      `Перелистни сетку и оцени снова, чтобы взять следующие предметы. ${spent}`
     );
-  }
-
-  /**
-   * Fetches what the shown items have been selling for.
-   *
-   * Explicit, and priced out loud before it starts: `pricehistory` runs about six
-   * a minute, so a hundred stacks is a quarter of an hour of somebody's IP budget.
-   */
-  async function loadHistory(): Promise<void> {
-    if (state.busy) return;
-    if (!state.groups.size) {
-      status("Сначала «Оценить» — историю качаю только для того, что уже на экране.", "warn");
-      return;
-    }
-
-    const items: ItemKeyed[] = [...state.groups.values()]
-      .filter((group) => state.lows[group.key] != null)
-      .map((group) => ({ key: group.key, appid: group.appid, hash: group.hash, name: group.name }));
-    if (!items.length) {
-      status("Нет ни одной оценённой позиции — сначала цены, потом история.", "warn");
-      return;
-    }
-
-    state.abort = false;
-    setBusy(true);
-
-    const outcome = await loadHistories(items, {
-      ...pacing,
-      onProgress: (done, total, label) => status(`История ${done}/${total} · ${label}`, "work"),
-    }, { ask: defaultAsk });
-
-    if (outcome.stopped === "declined") {
-      setBusy(false);
-      return;
-    }
-    if (outcome.stopped === "quiet") {
-      status(outcome.gateMessage, "warn");
-      setBusy(false);
-      return;
-    }
-
-    try {
-      Object.assign(state.stats, outcome.stats);
-      replan();
-      const known = items.filter((i) => state.stats[i.key] != null).length;
-      const spent = `Запросов ${outcome.requests}${outcome.fromCache ? `, из кэша ${outcome.fromCache}` : ""}.`;
-      if (outcome.stopped === "blocked") {
-        status(`Steam отказал: история есть у ${known} из ${items.length}. Не повторяй сразу. ${spent}`, "warn");
-      } else {
-        status(`История есть у ${known} из ${items.length}. ${spent}`, "ok");
-      }
-    } catch (err) {
-      status(`История: ${describeError(err)}`, "err");
-    } finally {
-      setBusy(false);
-    }
   }
 
   async function scan(): Promise<void> {
@@ -731,7 +647,6 @@ async function mount(ctx: FeatureContext): Promise<void> {
     }
 
     state.settings = await loadSettings();
-    fillControls();
     await waitForPage();
 
     if (!sessionId()) {
@@ -742,15 +657,14 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
     const owner = ownerFromUrl(location.pathname, steamId() ?? "");
 
-    fillGames();
-
     try {
       await refreshPage();
       const tiles = visibleTileRefs(document);
       if (!tiles.length) {
         status(
-          "Steam ещё не нарисовал сетку. Подожди загрузку инвентаря и нажми снова — беру только то, что на экране.",
-          "err"
+          "Steam ещё не нарисовал сетку",
+          "err",
+          "Дождись загрузки инвентаря и нажми снова — беру только то, что на экране."
         );
         setBusy(false);
         return;
@@ -780,7 +694,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
       }
 
       if (!items.length) {
-        status("Плитки вижу, названий нет. Обнови вкладку инвентаря и попробуй снова.", "err");
+        status("Плитки вижу, названий нет — обнови вкладку и попробуй снова", "err");
         setBusy(false);
         return;
       }
@@ -872,9 +786,23 @@ async function mount(ctx: FeatureContext): Promise<void> {
     if (!todo.length) return;
 
     const proceeds = plannedProceeds(todo);
+    /**
+     * The two things a list of two hundred hides from the person pressing
+     * the button: how long they are committing to, and the worst price in
+     * the batch. Both were discoverable only by scrolling, which is the
+     * same as hidden.
+     */
+    const deepest = deepestCut(todo);
     const confirmed = window.confirm(
-      `Выставить ${todo.length} предмет(ов) на продажу?\n\n` +
-        `Получим примерно ${money(proceeds)} за вычетом комиссии.\n` +
+      `Выставить ${todo.length} предмет(ов) на продажу?
+
+` +
+        `Тебе будет ${money(proceeds)} — это уже за вычетом комиссии.
+` +
+        `Примерно ${humanMinutes(runTimeMs(todo.length))} работы.
+` +
+        (deepest > 0 ? `Самая большая уступка рынку в партии — ${deepest}%.
+` : "") +
         "Каждую продажу надо подтвердить в Steam Guard."
     );
     if (!confirmed) return;
@@ -901,7 +829,6 @@ async function mount(ctx: FeatureContext): Promise<void> {
       lows: state.lows,
       settings: state.settings.sell,
       fees: feeConfig(),
-      stats: state.stats,
       onlyKeys: new Set([group.key]),
       onlyAssets: chosen.size ? chosen : sellable,
     });
@@ -911,9 +838,15 @@ async function mount(ctx: FeatureContext): Promise<void> {
       return;
     }
 
+    const deepest = deepestCut(todo);
     const confirmed = window.confirm(
-      `Выставить «${group.name}» — ${todo.length} шт. по ${money(todo[0]!.targetBuyer)}?\n\n` +
-        `Получим примерно ${money(plannedProceeds(todo))} за вычетом комиссии.\n` +
+      `Выставить «${group.name}» — ${todo.length} шт. по ${money(todo[0]!.targetBuyer)}?
+
+` +
+        `Тебе будет ${money(plannedProceeds(todo))} — это уже за вычетом комиссии.
+` +
+        (deepest > 0 ? `Это на ${deepest}% ниже минимума рынка.
+` : "") +
         "Каждую продажу надо подтвердить в Steam Guard."
     );
     if (!confirmed) return;
@@ -939,7 +872,21 @@ async function mount(ctx: FeatureContext): Promise<void> {
       const plan = todo[i]!;
       status(`Выставляю ${i + 1}/${todo.length}: ${plan.name}`, "work");
       try {
-        const result = await sellItem(plan, pacing);
+        /**
+         * One try at the item itself — nothing was delisted here, so «предмет
+         * не в инвентаре» is a verdict rather than a hand-back still in
+         * progress — but Steam's unexplained refusal is sat out, exactly as on
+         * the market tab. Without it one shrug turned a listed copy into a
+         * failed row and the seller never learned why.
+         */
+        const result = await sellItemWhenReady(plan, pacing, {
+          attempts: 1,
+          onRetry: (n) =>
+            status(
+              `Выставляю ${i + 1}/${todo.length}: ${plan.name} — Steam отказал и не сказал почему, жду и пробую снова (${n})`,
+              "work"
+            ),
+        });
         plan.result = "ok";
         if (needsConfirmation(result)) {
           plan.resultMessage = "ожидает Steam Guard";
@@ -968,8 +915,9 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
     if (halted) {
       status(
-        `Steam остановил продажи на ${ok} из ${todo.length}. Не продолжаю — бан от повторных запросов только удлиняется.`,
-        "warn"
+        `Steam остановил продажи на ${ok} из ${todo.length}`,
+        "warn",
+        "Дальше не иду: бан от повторных запросов только удлиняется."
       );
     } else {
       const parts = [`Готово: ${ok} ок`];
@@ -982,64 +930,10 @@ async function mount(ctx: FeatureContext): Promise<void> {
     renderRows();
   }
 
-  async function saveStrategy(): Promise<void> {
-    const strategy = strategySelect.value as SellStrategy;
-    const amount = Number.parseInt(amountInput.value, 10);
-    const perItem = Number.parseInt(perItemInput.value, 10);
-    const patch = clampSellSettings({
-      strategy,
-      ...(strategy === "markup" ? { markupPercent: amount } : { undercutCents: amount }),
-      maxPerItem: perItem,
-    });
-    state.settings = { ...state.settings, sell: { ...state.settings.sell, ...patch, strategy } };
-    await saveSettings({ sell: state.settings.sell });
-    fillControls();
-    if (state.groups.size) replan();
-  }
-
-  strategySelect.addEventListener("change", () => void saveStrategy());
-  historyBtn.addEventListener("click", () => void loadHistory());
-  amountInput.addEventListener("change", () => void saveStrategy());
-  perItemInput.addEventListener("change", () => void saveStrategy());
-
   queryInput.addEventListener("input", () => {
     state.filters = { ...state.filters, query: queryInput.value };
     renderRows();
     renderStats();
-  });
-
-  sortSelect.addEventListener("change", () => {
-    state.sort = sortSelect.value as SortKey;
-    renderRows();
-  });
-
-  marketableOnly.input.addEventListener("change", () => {
-    state.filters = { ...state.filters, onlyMarketable: marketableOnly.input.checked };
-    renderRows();
-    renderStats();
-  });
-
-  pricedOnly.input.addEventListener("change", () => {
-    state.filters = { ...state.filters, onlyPriced: pricedOnly.input.checked };
-    renderRows();
-    renderStats();
-  });
-
-  /** The bulk buttons act on what the filter shows — that is what filtering is for. */
-  pickAllBtn.addEventListener("click", () => {
-    for (const view of currentViews()) {
-      if (view.low == null || view.sellable < 1) continue;
-      if (groupPick(view.group, state.selection) !== "all") toggleGroup(view.group, state.selection);
-    }
-    replan();
-  });
-
-  pickNoneBtn.addEventListener("click", () => {
-    for (const view of currentViews()) {
-      if (groupPick(view.group, state.selection) === "none") continue;
-      state.selection.groups.add(view.group.key);
-    }
-    replan();
   });
 
   scanBtn.addEventListener("click", () => void scan());
@@ -1050,17 +944,10 @@ async function mount(ctx: FeatureContext): Promise<void> {
     status("Останавливаю…", "warn");
   });
 
-  /** The table arrives with the page, so refresh the picker when it lands. */
+  /** The wallet and the session still arrive with the page, so ask for them. */
   requestPageInfo();
-  window.setTimeout(fillGames, 600);
-  window.addEventListener("hashchange", fillGames);
-  gameSelect.addEventListener("change", () => {
-    status(`Выбрано: ${selectedChoice()?.label ?? "—"}. Нажми «Оценить страницу».`);
-  });
 
-  fillGames();
-  fillControls();
-  status("Открой нужную страницу инвентаря в Steam и нажми «Оценить страницу».");
+  status("Открой страницу инвентаря и нажми «Оценить страницу»");
   renderRows();
   renderStats();
 }

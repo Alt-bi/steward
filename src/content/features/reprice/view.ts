@@ -10,16 +10,29 @@ import type { Cents, RepricePlan } from "../../../core/types";
  * list decides what a mass cancel is about to remove.
  */
 
-export type ListingSortKey = "drop" | "price" | "name";
+/**
+ * Which subset the counters are pointing at.
+ *
+ * The panel counts «оверпрайс», «не проверено» and «пропуск» above the list, and
+ * a count is already the name of a subset — so the count is the control. It
+ * replaces a checkbox that said the same thing in more words and more width.
+ */
+export type ListingOnly = "" | "over" | "unsure" | "skip";
 
 export interface ListingFilters {
   /** Substring of the display name or the hash. Case and spacing are ignored. */
   query: string;
-  /** Hide everything the plan is not going to move. */
-  onlyMovable: boolean;
+  only: ListingOnly;
 }
 
-export const DEFAULT_LISTING_FILTERS: ListingFilters = { query: "", onlyMovable: false };
+export const DEFAULT_LISTING_FILTERS: ListingFilters = { query: "", only: "" };
+
+export function planInBucket(plan: RepricePlan, only: ListingOnly): boolean {
+  if (!only) return true;
+  if (only === "over") return isMovable(plan);
+  if (only === "unsure") return Boolean(plan.unverified);
+  return !isMovable(plan) && !plan.unverified;
+}
 
 function normalize(text: string): string {
   return String(text ?? "")
@@ -68,10 +81,15 @@ export function isMovable(plan: RepricePlan): boolean {
   return plan.action === "reprice" && isLive(plan);
 }
 
-function compare(a: RepricePlan, b: RepricePlan, sort: ListingSortKey): number {
+/**
+ * The one order worth having: what the run is about to do, biggest move first.
+ *
+ * There used to be a picker with three answers, and the other two never earned
+ * their width — «по названию» and «дороже лот» both bury the rows the panel
+ * exists to show.
+ */
+function compare(a: RepricePlan, b: RepricePlan): number {
   const byName = a.name.localeCompare(b.name) || a.listingId.localeCompare(b.listingId);
-  if (sort === "name") return byName;
-  if (sort === "price") return b.ourBuyer - a.ourBuyer || byName;
   /**
    * Skips sink under everything movable. A skip has no drop, and letting it sort
    * as a zero would scatter the actionable rows through the list.
@@ -83,16 +101,15 @@ function compare(a: RepricePlan, b: RepricePlan, sort: ListingSortKey): number {
 
 export function viewPlans(
   plans: readonly RepricePlan[],
-  filters: ListingFilters = DEFAULT_LISTING_FILTERS,
-  sort: ListingSortKey = "drop"
+  filters: ListingFilters = DEFAULT_LISTING_FILTERS
 ): RepricePlan[] {
   const out: RepricePlan[] = [];
   for (const plan of plans) {
     if (!planMatchesQuery(plan, filters.query)) continue;
-    if (filters.onlyMovable && !isMovable(plan)) continue;
+    if (!planInBucket(plan, filters.only)) continue;
     out.push(plan);
   }
-  return out.sort((a, b) => compare(a, b, sort));
+  return out.sort(compare);
 }
 
 export function listingId(plan: RepricePlan): string {

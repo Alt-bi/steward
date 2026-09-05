@@ -36,7 +36,7 @@ async function boot(): Promise<void> {
   const features = activeFeatures(url, settings);
   if (!features.length) return;
 
-  const panel = new Panel(features.map((f) => f.title.toLowerCase()).join(" · "));
+  const panel = new Panel();
 
   for (const feature of features) {
     try {

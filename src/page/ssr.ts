@@ -50,8 +50,16 @@ export interface PlainBookListing {
   price: number;
   /** Steam plus publisher fee, integer cents. */
   fee: number;
-  /** Steam's own answer to "is this ours", not a guess from listing ids. */
-  mine: boolean;
+  /**
+   * Steam's own answer to "is this ours", not a guess from listing ids.
+   *
+   * Undefined means the row never said — a different fact from «not ours», and
+   * it has to stay different: `competitorFromListings` reports «every row named
+   * its owner» as `flagged`, and the planner reads that as licence to undercut
+   * a lot priced exactly like ours. A shape that can only ever say `false`
+   * turns that check into a rubber stamp.
+   */
+  mine?: boolean;
   /** Which item of the group this lot is; the book mixes every wear together. */
   hash?: string;
   assetid?: string;
@@ -214,10 +222,17 @@ export function bookListingFrom(raw: unknown): PlainBookListing | null {
     price,
     fee: int(row.unFee) ?? 0,
     /**
-     * Anything other than a literal `true` is "not ours". Guessing the other way
-     * would have us pass over a stranger's lot and decline to undercut it.
+     * A literal boolean is Steam answering; anything else is Steam not saying.
+     *
+     * Both halves matter. Anything but `true` is «not ours», because reading a
+     * stranger's lot as our own means passing over it and never undercutting
+     * it. And a field that is simply absent must not be written down as
+     * `false`: that is the difference between «the book named every owner» and
+     * «the book named none», and only the first settles a tie. Measured
+     * 2026-09-01, `QueryListingsForItem` ships `bMine` on every row — so this
+     * is the guard for the day it stops, not a live bug.
      */
-    mine: row.bMine === true,
+    mine: typeof row.bMine === "boolean" ? row.bMine : undefined,
     hash: str(desc?.market_hash_name),
     assetid: str(asset?.assetid) ?? str(asset?.id),
     contextid: str(asset?.contextid),

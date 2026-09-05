@@ -106,7 +106,12 @@ export function describeRelistFailure(stage: WriteStage, err: unknown): WriteFai
    * clearing the account's market page one call at a time.
    */
   if (stage === "relisting") {
-    return { message: `снят, но НЕ выставлен — предмет в инвентаре (${why})`, stranded: true, halt: true };
+    /**
+     * It used to end «— предмет в инвентаре», which nothing had checked. Where
+     * the item actually is decides what the owner should do next, so the claim
+     * belongs to whoever looked, not to this table.
+     */
+    return { message: `снят, но НЕ выставлен (${why})`, stranded: true, halt: true };
   }
   if (stage === "removing" && outcomeUnknown(err)) {
     return { message: `неизвестно, снят ли лот — ${why}`, stranded: true, halt: true };

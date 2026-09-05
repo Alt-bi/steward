@@ -26,6 +26,8 @@ export interface FakeElement extends FakeNode {
   title: string;
   type: string;
   hidden: boolean;
+  /** `<details>`: the status fold is one, and the panel closes it by hand. */
+  open: boolean;
   disabled: boolean;
   checked: boolean;
   value: string;
@@ -35,7 +37,7 @@ export interface FakeElement extends FakeNode {
   classList: {
     add(...names: string[]): void;
     remove(...names: string[]): void;
-    toggle(name: string, on?: boolean): void;
+    toggle(name: string, on?: boolean): boolean;
     contains(name: string): boolean;
   };
   listeners: Map<string, ((event: unknown) => void)[]>;
@@ -118,6 +120,7 @@ export function createElement(tagName: string): FakeElement {
     title: "",
     type: "",
     hidden: false,
+    open: false,
     disabled: false,
     checked: false,
     value: "",
@@ -139,10 +142,12 @@ export function createElement(tagName: string): FakeElement {
     classList: {
       add: (...names) => names.forEach((n) => classes.add(n)),
       remove: (...names) => names.forEach((n) => classes.delete(n)),
+      /** Answers with the state it left the class in, exactly as the browser does. */
       toggle: (name, on) => {
         const want = on ?? !classes.has(name);
         if (want) classes.add(name);
         else classes.delete(name);
+        return want;
       },
       contains: (name) => classes.has(name),
     },

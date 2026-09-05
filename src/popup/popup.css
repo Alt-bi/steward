@@ -1,113 +1,256 @@
 :root {
   color-scheme: dark;
+  /* The same palette the on-page panel uses, so the two read as one product. */
+  --bg: #172433;
+  --sunk: #131e29;
+  --line: #2a475e;
+  --line-soft: #22394d;
+  --text: #c7d5e0;
+  --dim: #8b98a5;
+  --faint: #64757f;
+  --accent: #66c0f4;
 }
 
 body {
-  width: 320px;
+  width: 300px;
   margin: 0;
   padding: 14px;
-  background: #1b2838;
-  color: #c7d5e0;
+  background: var(--bg);
+  color: var(--text);
   font: 13px/1.4 "Motiva Sans", Arial, sans-serif;
 }
 
 h1 {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   margin: 0;
   font-size: 15px;
-  color: #66c0f4;
+  color: #fff;
+  letter-spacing: 0.02em;
 }
 
-h2 {
-  margin: 0 0 4px;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #8f98a0;
+/* The version is here for one reason: it is how you tell a reload took. */
+.ver {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
 }
 
 header p {
-  margin: 4px 0 12px;
+  margin: 4px 0 0;
   font-size: 11px;
   color: #8f98a0;
 }
 
+/* One thing to press, and one more beside it. */
+.go {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 button {
-  width: 100%;
+  flex: 1;
   border: 0;
-  border-radius: 3px;
+  border-radius: 6px;
   padding: 9px 10px;
-  background: #1a9fff;
-  color: #fff;
+  background: #294560;
+  color: var(--text);
+  font: inherit;
   font-weight: 600;
   cursor: pointer;
+  transition: background 0.12s ease, transform 0.06s ease;
 }
 
-button:hover {
-  background: #47b5ff;
+button:active {
+  transform: translateY(1px);
 }
 
-button.ghost {
-  background: #2a475e;
-  color: #c7d5e0;
-  font-weight: 500;
-  padding: 6px 10px;
+button.primary {
+  background: linear-gradient(180deg, #2aa8ff, #1385e0);
+  color: #fff;
+}
+
+button.primary:hover {
+  background: linear-gradient(180deg, #52bcff, #1f95f0);
 }
 
 button.ghost:hover {
-  background: #3d6c8d;
+  background: #375c7d;
 }
 
-.field {
-  display: block;
-  margin-top: 12px;
+button.thin {
+  width: 100%;
+  padding: 6px 10px;
   font-size: 12px;
+  font-weight: 500;
+}
+
+button:focus-visible,
+summary:focus-visible {
+  outline: 2px solid #66c0f4;
+  outline-offset: 1px;
+}
+
+/*
+ * The health card: one verdict, one bar, one line of counters. Colour carries
+ * the state, so the sentence never has to shout it.
+ */
+.health {
+  margin-top: 12px;
+  padding: 10px 11px;
+  border-radius: 3px 8px 8px 3px;
+  border-left: 3px solid var(--line);
+  background: var(--sunk);
+}
+
+.health-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-weight: 600;
+  color: #c7d5e0;
+}
+
+.health-line::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #5c6874;
+}
+
+.health[data-state="ok"] {
+  border-left-color: #a4d007;
+}
+
+.health[data-state="ok"] .health-line::before {
+  background: #a4d007;
+}
+
+.health[data-state="warn"] {
+  border-left-color: #e4b85c;
+}
+
+.health[data-state="warn"] .health-line {
+  color: #e4b85c;
+}
+
+.health[data-state="warn"] .health-line::before {
+  background: #e4b85c;
+}
+
+.health[data-state="err"] {
+  border-left-color: #e35a4f;
+}
+
+.health[data-state="err"] .health-line {
+  color: #e35a4f;
+}
+
+.health[data-state="err"] .health-line::before {
+  background: #e35a4f;
+}
+
+.meter {
+  height: 4px;
+  margin: 8px 0 6px;
+  border-radius: 2px;
+  background: #0e1620;
+  overflow: hidden;
+}
+
+/* An empty track reads as an empty input, so before the first answer there
+   is nothing to read. */
+.health[data-state="idle"] .meter {
+  display: none;
+}
+
+.meter i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #1a9fff, #66c0f4);
+  transition: width 0.4s ease;
+}
+
+.health[data-state="warn"] .meter i {
+  background: #e4b85c;
+}
+
+.health[data-state="err"] .meter i {
+  background: #e35a4f;
+}
+
+/* Everything that is reference rather than news lives behind a fold. */
+.fold {
+  margin-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 8px;
+}
+
+.fold summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #66c0f4;
+  opacity: 0.85;
+}
+
+.fold summary::-webkit-details-marker {
+  display: none;
+}
+
+.fold summary::before {
+  content: "\25b8  ";
+}
+
+.fold[open] summary::before {
+  content: "\25be  ";
+}
+
+.fold summary:hover {
+  opacity: 1;
+}
+
+/* Label left, value right, on one baseline — a table without table rules. */
+.std {
+  margin: 8px 0 0;
+}
+
+.std > div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.std > div + div {
+  border-top: 1px solid #22303f;
+}
+
+.std dt {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
   color: #8f98a0;
 }
 
-.field span {
-  display: block;
-  margin-bottom: 4px;
-}
-
-.field select {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 6px 8px;
-  border: 1px solid #2a475e;
-  border-radius: 3px;
-  background: #16202d;
-  color: #c7d5e0;
-}
-
-.field input {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 6px 8px;
-  border: 1px solid #2a475e;
-  border-radius: 3px;
-  background: #16202d;
-  color: #c7d5e0;
-}
-
-.check {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin-top: 12px;
+.std dd {
+  margin: 0;
+  color: #fff;
   font-size: 12px;
-  color: #c7d5e0;
-  cursor: pointer;
-}
-
-.check input {
-  margin: 2px 0 0;
-  accent-color: #1a9fff;
-}
-
-.net {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid #2a475e;
+  font-weight: 600;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .fine {
@@ -116,15 +259,31 @@ button.ghost:hover {
   color: #8f98a0;
 }
 
+.mono {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 10px;
+}
+
+.mono:empty {
+  display: none;
+}
+
+.foot {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  color: #6a7a86;
+}
+
 .log {
   margin: 8px 0;
   padding: 6px 8px;
   max-height: 140px;
   overflow: auto;
   list-style: none;
-  background: #16202d;
-  border: 1px solid #2a475e;
-  border-radius: 3px;
+  background: var(--sunk);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
   font: 10px/1.5 Consolas, "Courier New", monospace;
   color: #8f98a0;
 }
@@ -146,9 +305,4 @@ button.ghost:hover {
 
 .log li[data-kind="empty"] {
   color: #e4b85c;
-}
-
-.blocked {
-  color: #e35a4f;
-  font-weight: 600;
 }

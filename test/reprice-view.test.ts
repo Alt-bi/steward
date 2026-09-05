@@ -83,44 +83,21 @@ describe("viewPlans", () => {
     );
   });
 
-  it("sorts by what the listing asks when told to", () => {
-    const views = viewPlans([over, skipped, slightly], { query: "", onlyMovable: false }, "price");
-    assert.deepEqual(
-      views.map((v) => v.ourBuyer),
-      [9000, 1000, 500]
-    );
-  });
-
-  it("sorts by name without pushing skips around", () => {
-    const views = viewPlans([over, skipped, slightly], { query: "", onlyMovable: false }, "name");
-    assert.deepEqual(
-      views.map((v) => v.name),
-      ["AK-47 | Redline", "Chroma Case", "Glove Case"]
-    );
-  });
-
-  it("filters to what the plan will actually move", () => {
-    const views = viewPlans([over, skipped, slightly], { query: "", onlyMovable: true });
-    assert.deepEqual(
-      views.map((v) => v.listingId),
-      ["1", "2"]
-    );
-  });
-
   it("treats a listing already done as no longer movable", () => {
     const done = plan({ listingId: "4", result: "ok", resultMessage: "выставлен" });
     assert.equal(isMovable(done), false);
-    assert.deepEqual(viewPlans([done], { query: "", onlyMovable: true }), []);
+    /** Still listed — just at the bottom, where nothing is going to happen to it. */
+    assert.deepEqual(viewPlans([done, over]).map((v) => v.listingId), ["1", "4"]);
   });
 
   it("returns nothing rather than everything when the query matches nothing", () => {
-    assert.deepEqual(viewPlans([over, skipped], { query: "karambit", onlyMovable: false }), []);
+    assert.deepEqual(viewPlans([over, skipped], { query: "karambit", only: "" }), []);
   });
 });
 
 describe("listingTotals", () => {
   it("adds up the rows on screen, not the whole page", () => {
-    const views = viewPlans([over, slightly, skipped], { query: "case", onlyMovable: false });
+    const views = viewPlans([over, slightly, skipped], { query: "case", only: "" });
     const totals = listingTotals(views, noneDropped());
     assert.deepEqual(totals, { shown: 2, movable: 2, picked: 2, value: 1500 });
   });
@@ -135,7 +112,7 @@ describe("listingTotals", () => {
 describe("what each button acts on", () => {
   it("reprices every ticked overpriced listing, shown or not", () => {
     /** Otherwise the button's number would depend on the search box. */
-    const hidden = viewPlans([over, slightly], { query: "glove", onlyMovable: false });
+    const hidden = viewPlans([over, slightly], { query: "glove", only: "" });
     assert.equal(hidden.length, 1, "only one row is on screen");
     assert.deepEqual(
       movablePlans([over, slightly], noneDropped()).map((p) => p.listingId),
@@ -154,7 +131,7 @@ describe("what each button acts on", () => {
 
   it("cancels only what is on screen and ticked", () => {
     /** The opposite rule from repricing: a mass cancel is aimed with the filter. */
-    const views = viewPlans([over, slightly, skipped], { query: "case", onlyMovable: false });
+    const views = viewPlans([over, slightly, skipped], { query: "case", only: "" });
     assert.deepEqual(
       cancellablePlans(views, noneDropped()).map((p) => p.listingId),
       ["1", "2"]
@@ -162,7 +139,7 @@ describe("what each button acts on", () => {
   });
 
   it("cancels skipped listings too — a skip is still on the market", () => {
-    const views = viewPlans([skipped], { query: "", onlyMovable: false });
+    const views = viewPlans([skipped], { query: "", only: "" });
     assert.deepEqual(
       cancellablePlans(views, noneDropped()).map((p) => p.listingId),
       ["3"]
@@ -171,7 +148,48 @@ describe("what each button acts on", () => {
 
   it("never touches a listing that is already gone", () => {
     const gone = plan({ listingId: "9", result: "ok", resultMessage: "снят — предмет в инвентаре" });
-    const views = viewPlans([gone], { query: "", onlyMovable: false });
+    const views = viewPlans([gone], { query: "", only: "" });
     assert.deepEqual(cancellablePlans(views, noneDropped()), []);
+  });
+});
+
+/**
+ * The counters above the list are the filter.
+ *
+ * A count is already the name of a subset, so «67 оверпрайс» is a better
+ * control than a checkbox beside it saying the same thing — and it costs no
+ * width at all, because the number was going to be drawn anyway.
+ */
+describe("filtering by what a counter counts", () => {
+  it("narrows to the lots a run would move", () => {
+    const views = viewPlans([over, skipped, slightly], { query: "", only: "over" });
+    assert.deepEqual(
+      views.map((v) => v.listingId),
+      ["1", "2"]
+    );
+  });
+
+  it("narrows to the ones nobody could check", () => {
+    const unsure = plan({ listingId: "9", action: "skip", unverified: true });
+    assert.deepEqual(
+      viewPlans([over, unsure], { query: "", only: "unsure" }).map((v) => v.listingId),
+      ["9"]
+    );
+  });
+
+  it("narrows to the settled skips, which are neither of those", () => {
+    const unsure = plan({ listingId: "9", action: "skip", unverified: true });
+    assert.deepEqual(
+      viewPlans([over, unsure, skipped], { query: "", only: "skip" }).map((v) => v.listingId),
+      ["3"]
+    );
+  });
+
+  it("shows everything again when no counter is pressed", () => {
+    assert.equal(viewPlans([over, skipped, slightly], { query: "", only: "" }).length, 3);
+  });
+
+  it("still obeys the search box on top of the counter", () => {
+    assert.deepEqual(viewPlans([over, slightly], { query: "karambit", only: "over" }), []);
   });
 });

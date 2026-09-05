@@ -272,9 +272,20 @@ async function fetchRaw(url: string, opts: FetchOptions & { html?: boolean }): P
      * three requests. The thrown error stays `not_json`, so callers that read
      * the page's own title still do.
      */
-    reportOutcome(opts.kind, "rate_limited", `not_json ${url}`);
-    /** The page names itself; carrying that out costs nothing and ends the guessing. */
-    throw new SteamError("not_json", undefined, { status: res.status, note: markupNote(text) });
+    reportOutcome(opts.kind, "wrong_shape", `not_json ${url}`);
+    /**
+     * The page names itself; carrying that out costs nothing and ends the guessing.
+     *
+     * And a redirect says it louder than any title. `fetch` follows a 302
+     * without a word, so «Steam sent the market homepage» covers two opposite
+     * situations: the endpoint refusing us, and the endpoint not being at that
+     * address for this session at all. Only the second is fixed by changing
+     * the request, and `res.redirected` is the one bit that tells them apart —
+     * it cost nothing to read and we were throwing it away.
+     */
+    const landed = res.redirected ? res.url.replace(/^https?:\/\/[^/]+/, "") : "";
+    const note = landed ? `перенаправлено на ${landed} — ${markupNote(text)}` : markupNote(text);
+    throw new SteamError("not_json", undefined, { status: res.status, note });
   }
 
   return text;

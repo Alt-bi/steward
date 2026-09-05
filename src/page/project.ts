@@ -44,6 +44,7 @@ export interface PlainWallet {
   wallet_fee_percent?: string | number;
   wallet_fee_minimum?: string | number;
   wallet_fee_base?: string | number;
+  wallet_market_minimum?: string | number;
   wallet_publisher_fee_percent_default?: string | number;
 }
 
@@ -55,6 +56,7 @@ export function projectWallet(raw: unknown): PlainWallet | null {
     wallet_fee_percent: scalar(raw.wallet_fee_percent),
     wallet_fee_minimum: scalar(raw.wallet_fee_minimum),
     wallet_fee_base: scalar(raw.wallet_fee_base),
+    wallet_market_minimum: scalar(raw.wallet_market_minimum),
     wallet_publisher_fee_percent_default: scalar(raw.wallet_publisher_fee_percent_default),
   });
 }

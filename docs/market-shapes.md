@@ -122,3 +122,192 @@ Two rules follow from the above, and both were broken:
   The run now falls back to them instead of doing nothing, which is the whole
   difference between «ничего не работает» and «посчитано по рыночному
   минимуму».
+
+## Что называет предмет в строке /market (замер 2026-09-03)
+
+Прогон `npm run probe` в консоли на /market, аккаунт с 700+ лотами, страница
+показывает 10:
+
+| | |
+|---|---|
+| нарисовано строк | 10 |
+| разобрано лотов | 10 |
+| с assetid | 10 |
+| hover-ссылок из `document.scripts` | 10 |
+| строк с `RemoveMarketListing(...)` в разметке | 10 |
+| `hovers`-блоб | 193 064 символов, 34 скрипта на странице |
+| `g_sessionID` / `g_rgWalletInfo` / `g_rgAssets` | есть / есть / есть |
+
+Оба источника assetid живы одновременно: **кнопка отмены печатает
+`RemoveMarketListing( 'mylisting', '<listingid>', <appid>, '<contextid>',
+'<assetid>' )` в каждой строке**, и hover-скрипт лежит на странице отдельно, как
+и записано выше. Скан не ходит в `/market/mylistings` вообще.
+
+Это опровергло гипотезу, под которую уже был написан код (см. DEVLOG 2.37.1):
+«кнопка отмены не совпадает, значит строки слепые». Мерить дешевле.
+
+## The listing book, re-measured 2026-09-03 (live Edge, logged-in account)
+
+Everything below was run in the page's own console on `/market`, one request at
+a time, with pauses. It contradicts the section above it in three places, and
+the measurement wins.
+
+### `market/actions?q=QueryListingsForItem` does not answer this context at all
+
+`200`, `content-type: text/html`, 1 085 499 bytes of the market homepage —
+**with** `x-valve-request-type: queryAction`, **without** it, and with the
+classic `X-Requested-With` signature. `res.redirected` is `false`, so it is not
+a redirect either. Three tries, three homepages. This is what every scan was
+ending in as «Steam дважды прислал веб-страницу».
+
+### `market/listings/{appid}/{market_hash_name}/render/` is alive and is the book
+
+```
+?query=&start=0&count=10&currency=5&language=russian&country=RU
+→ {success, start, pagesize, total_count, results_html, listinginfo, assets, currency, hovers, app_data}
+```
+
+`listinginfo` is keyed by listing id; each row carries `converted_price` +
+`converted_fee` (buyer total = their sum) alongside `price`/`fee`, plus
+`publisher_fee_percent` and `asset`. Our own lots appear in it and are
+recognised by listing id, so the competitor minimum is exact without any
+ownership flag. Latency 370–670 ms.
+
+**`count` is a whitelist, not a number.** Same item, one request each:
+
+| count | answer |
+|-------|--------|
+| 1, 10, 20, 100 | `success: true`, the book |
+| 5, 11, 12, 25, 50, 75 | `success: false`, `total_count: 0`, no rows |
+
+`scanWindow` used to return `ourCount + 10` — 11 for any item we hold one lot of
+— so essentially every book request asked an unserved depth, got an empty book,
+and had it read (correctly!) as Steam refusing about an item we are selling.
+Two of those stop a run; four put the governor into a cooldown. Round up to the
+next served size instead.
+
+**No group-id wall.** `AK-47 | Redline (Field-Tested)` answers by
+`market_hash_name`, `total_count: 1201`, 20 rows for `count=20`. The whole
+`strItemName`-is-a-group-id detour existed only for the action endpoint.
+
+**A commodity has no rows.** `Fracture Case` answers `total_count: 1` with an
+empty `listinginfo`: cases and keys trade through an order book. That is an
+answer, not a refusal — price those from `priceoverview`.
+
+### `search/render` does not know card hashes
+
+`?norender=1&appid=753&query=489260-Rock%20Golem%20(Foil)` → `total_count: 0`.
+The search index does not match hash names of trading cards, so a page of cards
+spends one request per group to learn nothing. `priceoverview` with the same
+full hash answers `81,27 руб.` — that one works.
+
+### Pace
+
+Thirty `/render/` calls at 1.2 s apart (~45/min) over three minutes, none
+degraded, no HTML, no 429. The global IP budget of 20/min stays the ceiling we
+actually ship, because the Steam client and the user's other tabs share it.
+
+### `mylistings` on a 669-lot account
+
+`?start=0&count=100` answers `{success, pagesize, total_count, assets, start,
+num_active_listings, hovers, results_html}` — 100 rows a page, 7 pages, ~12 s
+at 1.2 s apart. That is the whole account's listing ids and prices, which is
+what tells our own lot from a stranger's when the book cannot.
+
+## Комиссия и дно рынка, измерено 2026-09-03 (кошелёк RUB)
+
+`g_rgWalletInfo` на `/market/`:
+
+```
+wallet_fee_percent: "0.05"   wallet_fee_minimum: "87"
+wallet_fee_base: "0"         wallet_market_minimum: "87"
+wallet_publisher_fee_percent_default: "0.10"
+```
+
+`wallet_fee_minimum` — пол под **обеими** комиссиями, не только под своей:
+
+```
+buyer = seller + max(seller*0.05, 87) + max(seller*pub, 87)
+```
+
+Проверка на ответах самого Steam (`converted_price` + `converted_fee`):
+
+| продавец | комиссия | покупатель | формула |
+| --- | --- | --- | --- |
+| 87 | 174 | 261 | дно: 87+87+87 |
+| 2429 | 363 | 2792 | проценты |
+| 7068 | 1059 | 8127 | проценты |
+| 53845 | 8076 | 61921 | проценты |
+
+Сто лотов `AK-47 | Redline (Field-Tested)` и десять лотов аккаунта сходятся все.
+С полом в 1 копейку под комиссией издателя сходились только те, что выше дна.
+
+`wallet_market_minimum: 87` — минимум, который может получить продавец. Значит
+минимальная цена покупателя — 2,61 ₽, и ниже лота не существует.
+
+## Чего у `/market/mylistings/render/` нет, 2026-09-03
+
+`query=<текст>` **игнорируется**: ответ всегда весь аккаунт
+(`total_count: 669`), сколько бы ни было совпадений с названием. Фильтра по
+предмету нет — узнать свои лоты конкретного предмета можно только полным
+обходом.
+
+## Пагинация «Моих лотов», 2026-09-03
+
+Кнопка следующей страницы переписывает строки через AJAX. `document.scripts`
+при этом **не меняется**: hover-блок продолжает описывать первую страницу.
+
+| после перелистывания | значение |
+| --- | --- |
+| строк на экране | 10 (новых) |
+| `document.scripts` | 34 → 34 |
+| hover-вызовов в них | 20, все про прошлую страницу |
+| из них разрешаются в `g_rgAssets` | 20 |
+| строк текущей страницы, покрытых блоком | 0 |
+| строк с кнопкой `RemoveMarketListing` | 10 из 10 |
+
+Читать блок без привязки к нарисованным строкам нельзя: он не дополняет их, а
+добавляет чужие. Строки при этом называют свой assetid сами.
+
+## Снятие лота, измерено 2026-09-04
+
+`removelisting` возвращает предмет в инвентарь **под новым assetid**.
+
+| | |
+| --- | --- |
+| id, который держал лот | `38179473068` |
+| id в инвентаре после снятия | `39042662381` |
+| `marketable` / `tradable` | 1 / 1 |
+
+Повторять `sellitem` со старым id бесполезно: ответ «The item is no longer in
+your inventory» верен и останется верным. Предмет надо найти заново.
+
+## Кто владелец лота, 2026-09-04
+
+`/render/` про владельца не говорит ничего: в ответе нет ни `steam_id_lister`,
+ни `mylisting_` — даже когда наш собственный лот в книге есть. `results_html`
+рисует кнопку `BuyMarketListing` и на нашем лоте тоже.
+
+Зато **полная страница предмета** (`/market/listings/{appid}/{hash}`, ~90 КБ)
+несёт всё сразу:
+
+| в странице | что это |
+| --- | --- |
+| `var g_rgListingInfo = {...}` | та же книга, что у `/render/` |
+| строки `id="listing_<id>"` | чужие лоты |
+| строки `id="mylisting_<id>"` | **наши лоты этого предмета** |
+| `RemoveMarketListing('mylisting', '<listingid>', appid, '<ctx>', '<assetid>')` | id и предмет каждого нашего лота |
+
+Это ответ на вопрос «не наш ли лот держит минимум» — по предмету, за один
+запрос, без обхода аккаунта.
+
+## Пределы `/market/mylistings`, 2026-09-04
+
+| параметр | что получилось |
+| --- | --- |
+| `count=100` | 100 лотов, `pagesize: 100` |
+| `count=500`, `count=1000` | те же 100, `pagesize: 100` |
+| `norender=1` | нет `results_html` **и нет `hovers`** — id не приходят |
+
+Обход аккаунта укоротить нечем: 669 лотов — это семь запросов и ~3,2 МБ.
+

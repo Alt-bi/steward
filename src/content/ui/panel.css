@@ -1,4 +1,25 @@
+/**
+ * One palette, named once.
+ *
+ * The colours were written out at every use site, so «the blue of a hovered
+ * button» existed in four places and drifted between them. Named here, a tab,
+ * a row and a chip can be told to agree.
+ */
 #stw-root {
+  --stw-bg: #172433;
+  --stw-bg-sunk: #131e29;
+  --stw-bg-lift: #1f3145;
+  --stw-line: #2a475e;
+  --stw-line-soft: #22394d;
+  --stw-text: #c7d5e0;
+  --stw-dim: #8b98a5;
+  --stw-faint: #64757f;
+  --stw-white: #ffffff;
+  --stw-accent: #66c0f4;
+  --stw-go: #46c06a;
+  --stw-warn: #e4b85c;
+  --stw-bad: #e35a4f;
+
   position: fixed;
   top: 88px;
   right: 16px;
@@ -10,12 +31,12 @@
   max-height: calc(100vh - 110px);
   display: flex;
   flex-direction: column;
-  background: #1b2838;
-  color: #c7d5e0;
-  border: 1px solid #2a475e;
-  border-radius: 8px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
-  font: 13px/1.35 "Motiva Sans", Arial, sans-serif;
+  background: var(--stw-bg);
+  color: var(--stw-text);
+  border: 1px solid #2f4a63;
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.35);
+  font: 13px/1.4 "Motiva Sans", Arial, sans-serif;
   overflow: hidden;
 }
 
@@ -31,9 +52,10 @@
 .stw-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  background: #16202d;
+  gap: 10px;
+  padding: 11px 13px;
+  background: linear-gradient(180deg, #1d2f42, #16202d);
+  border-bottom: 1px solid var(--stw-line-soft);
   cursor: move;
   user-select: none;
 }
@@ -44,56 +66,95 @@
 }
 
 .stw-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   font-weight: 700;
-  color: #66c0f4;
+  font-size: 14px;
+  color: var(--stw-white);
   letter-spacing: 0.02em;
+}
+
+/** The version is a fact, not a heading: same line, quieter than the name. */
+.stw-ver {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--stw-accent);
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+.stw-sub:empty {
+  display: none;
 }
 
 .stw-sub {
   font-size: 11px;
-  color: #8f98a0;
+  color: var(--stw-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .stw-iconbtn {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   border: 0;
-  border-radius: 4px;
-  background: #2a475e;
-  color: #c7d5e0;
+  border-radius: 6px;
+  background: rgba(102, 192, 244, 0.1);
+  color: var(--stw-dim);
   cursor: pointer;
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1;
+  transition: background 0.12s ease, color 0.12s ease;
 }
 
 .stw-iconbtn:hover {
-  background: #3d6c8d;
+  background: rgba(102, 192, 244, 0.22);
+  color: var(--stw-white);
 }
 
 .stw-tabs {
   display: flex;
-  gap: 1px;
-  background: #2a475e;
+  gap: 2px;
+  padding: 6px 8px 0;
+  background: #16202d;
+  border-bottom: 1px solid var(--stw-line-soft);
 }
 
 .stw-tabs[hidden] {
   display: none;
 }
 
+/**
+ * A tab says which page you are on, so the current one is the only lit thing
+ * in the row: an underline in the accent, and the text at full contrast.
+ */
 .stw-tab {
   flex: 1;
   border: 0;
-  padding: 7px 8px;
-  background: #16202d;
-  color: #8f98a0;
+  border-radius: 6px 6px 0 0;
+  padding: 7px 8px 6px;
+  background: transparent;
+  color: var(--stw-dim);
   cursor: pointer;
+  font: inherit;
   font-size: 12px;
+  border-bottom: 2px solid transparent;
+  transition: color 0.12s ease, background 0.12s ease;
 }
 
-.stw-tab-on {
-  background: #1b2838;
-  color: #66c0f4;
+.stw-tab:hover {
+  color: var(--stw-text);
+  background: rgba(102, 192, 244, 0.07);
+}
+
+.stw-tab-on,
+.stw-tab-on:hover {
+  background: var(--stw-bg);
+  color: var(--stw-white);
   font-weight: 600;
+  border-bottom-color: var(--stw-accent);
 }
 
 .stw-stack {
@@ -114,9 +175,63 @@
 }
 
 .stw-status {
-  padding: 8px 12px 6px;
+  padding: 9px 13px 7px;
   font-size: 12px;
   line-height: 1.45;
+  color: var(--stw-dim);
+}
+
+/** Nothing to say is better said with nothing than with an empty band. */
+.stw-status:not([data-kind]) .stw-status-line:empty {
+  display: none;
+}
+
+/* The answer, in the words someone would say out loud. Everything that
+   qualifies it is true, and four lines of it is how the answer gets buried. */
+.stw-status-line {
+  color: #c7d5e0;
+  font-weight: 600;
+}
+
+.stw-status[data-kind="work"] .stw-status-line,
+.stw-status[data-kind="err"] .stw-status-line,
+.stw-status[data-kind="ok"] .stw-status-line,
+.stw-status[data-kind="warn"] .stw-status-line {
+  color: inherit;
+}
+
+.stw-status-more[hidden] {
+  display: none;
+}
+
+.stw-status-summary {
+  cursor: pointer;
+  list-style: none;
+  margin-top: 3px;
+  font-size: 11px;
+  color: #66c0f4;
+  opacity: 0.85;
+}
+
+.stw-status-summary::-webkit-details-marker {
+  display: none;
+}
+
+.stw-status-summary::before {
+  content: "▸ ";
+}
+
+.stw-status-more[open] .stw-status-summary::before {
+  content: "▾ ";
+}
+
+.stw-status-summary:hover {
+  opacity: 1;
+}
+
+.stw-status-detail {
+  margin-top: 4px;
+  font-weight: 400;
   color: #8f98a0;
 }
 
@@ -155,113 +270,186 @@
 
 /* --- reprice feature --- */
 
+/* Fits whatever a tab counts: three stats or four, evenly, never a stray
+   half-row with an empty cell beside it. */
 .stw-stats {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 1px;
-  background: #2a475e;
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+  gap: 6px;
+  padding: 2px 13px 0;
 }
 
 .stw-stat {
-  background: #1b2838;
+  background: var(--stw-bg-sunk);
+  border: 1px solid transparent;
+  border-radius: 8px;
   padding: 8px 6px;
   text-align: center;
+  width: 100%;
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+/* A count is already the name of a subset; making it the filter puts the
+   control where the number is instead of next to it. */
+.stw-stat:hover:not(:disabled) {
+  background: var(--stw-bg-lift);
+}
+
+.stw-stat[aria-pressed="true"] {
+  background: var(--stw-bg-lift);
+  border-color: rgba(102, 192, 244, 0.55);
+}
+
+.stw-stat:disabled {
+  cursor: default;
+  background: var(--stw-bg-sunk);
 }
 
 .stw-stat-n {
   font-size: 18px;
   font-weight: 700;
-  color: #ffffff;
+  line-height: 1.15;
+  color: var(--stw-white);
 }
 
 .stw-stat[data-tone="warn"] .stw-stat-n {
-  color: #e4b85c;
+  color: var(--stw-warn);
 }
 
+/* «18 402,10 ₽» is three times the width of a count and cannot have its size. */
+.stw-stat-money .stw-stat-n {
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+/** The bench count is the number that says the factory is actually working. */
+.stw-stat[data-tone="go"] .stw-stat-n {
+  color: var(--stw-go);
+}
+
+/**
+ * Lower case, deliberately. Four counters share a 440-px row, and «НЕ
+ * ПРОВЕРЕНО» in caps with letter-spacing does not fit its quarter of it — the
+ * label that says which number you are looking at was the first thing clipped.
+ */
 .stw-stat-l {
+  margin-top: 1px;
   font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #8f98a0;
+  letter-spacing: 0.04em;
+  color: var(--stw-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* The main action gets the width; the rest share the row under it. A row of
+   four equal buttons wrapped every label onto two lines and read as broken. */
 .stw-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 10px;
-  padding: 10px 12px;
-  border-top: 1px solid #2a475e;
+  padding: 10px 13px;
+  border-top: 1px solid var(--stw-line-soft);
 }
 
-/* The follow-up row is part of the same block; one rule between them is enough. */
+.stw-actions-main {
+  padding-bottom: 0;
+}
+
+.stw-actions-main .stw-btn {
+  flex: 1 1 100%;
+  padding-top: 9px;
+  padding-bottom: 9px;
+  font-size: 13px;
+}
+
+.stw-actions-rest .stw-btn {
+  flex: 1 1 0;
+  white-space: nowrap;
+}
+
+/* The follow-up rows are part of the same block: no rule, no gap of their own.
+   They keep the 8px the buttons keep between each other — without it the wide
+   scan button sits flush on the row beneath and reads as one mashed control. */
 .stw-actions + .stw-actions {
   margin-top: 0;
-  padding-top: 0;
+  padding-top: 8px;
   border-top: 0;
 }
 
 .stw-btn {
   flex: 1;
   border: 0;
-  border-radius: 3px;
+  border-radius: 6px;
   padding: 8px 10px;
   cursor: pointer;
+  font: inherit;
   font-weight: 600;
-  background: #2a475e;
-  color: #c7d5e0;
-  transition: background 0.12s ease, opacity 0.12s ease;
+  background: #294560;
+  color: var(--stw-text);
+  transition: background 0.12s ease, opacity 0.12s ease, transform 0.06s ease;
 }
 
 .stw-btn:hover:not(:disabled) {
-  background: #3d6c8d;
+  background: #375c7d;
+}
+
+/** A button that visibly gives under the press feels connected to the click. */
+.stw-btn:active:not(:disabled) {
+  transform: translateY(1px);
 }
 
 .stw-btn:disabled {
-  opacity: 0.4;
+  opacity: 0.35;
   cursor: default;
 }
 
 .stw-btn-primary {
-  background: #1a9fff;
+  background: linear-gradient(180deg, #2aa8ff, #1385e0);
   color: #fff;
 }
 
 .stw-btn-primary:hover:not(:disabled) {
-  background: #47b5ff;
+  background: linear-gradient(180deg, #52bcff, #1f95f0);
 }
 
 .stw-btn-go {
-  background: #6a9e0c;
+  background: linear-gradient(180deg, #63ad24, #4d8a13);
   color: #fff;
 }
 
 .stw-btn-go:hover:not(:disabled) {
-  background: #86b43b;
+  background: linear-gradient(180deg, #76c22f, #5c9c1c);
 }
 
 /* Cancelling is the one button here that removes something, so it looks like it. */
 .stw-btn-danger {
-  background: #8c3a3a;
-  color: #fff;
+  background: #6f2f2f;
+  color: #ffd9d5;
 }
 
 .stw-btn-danger:hover:not(:disabled) {
-  background: #a94a4a;
+  background: #8d3c3c;
 }
 
 .stw-rows {
   overflow: auto;
-  padding: 0 8px 8px;
+  padding: 2px 10px 10px;
   min-height: 80px;
 }
 
 .stw-empty {
-  padding: 22px 12px;
+  margin: 6px 0;
+  padding: 26px 16px;
   text-align: center;
-  color: #6a7a86;
+  color: var(--stw-faint);
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.55;
+  border: 1px dashed var(--stw-line-soft);
+  border-radius: 8px;
 }
 
 .stw-row {
@@ -269,14 +457,16 @@
   grid-template-columns: 1fr auto;
   grid-template-rows: auto auto;
   gap: 2px 10px;
-  padding: 8px;
+  padding: 8px 9px;
   margin-bottom: 6px;
-  background: #16202d;
-  border-left: 3px solid #2a475e;
-  border-radius: 3px;
+  background: var(--stw-bg-sunk);
+  border-left: 3px solid var(--stw-line);
+  border-radius: 3px 7px 7px 3px;
+  transition: background 0.12s ease, border-left-color 0.12s ease;
 }
 
 .stw-row:hover {
+  background: #172636;
   border-left-color: #3d6c8d;
 }
 
@@ -329,14 +519,48 @@
   font-weight: 400;
 }
 
+/* «111,87 → 76,70» and «109,39 → 100,79» are the same arrow and not the same
+   decision: one is a third of the price. The number says which. */
+.stw-drop {
+  margin-left: 6px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+
+.stw-drop[data-deep="easy"] {
+  color: #8f98a0;
+  background: #22303f;
+}
+
+.stw-drop[data-deep="some"] {
+  color: #e4b85c;
+  background: #3a3120;
+}
+
+.stw-drop[data-deep="hard"] {
+  color: #ffb4ad;
+  background: #4a2320;
+}
+
+/* One line, always. A reason that wraps pushes the row taller than its
+   neighbours and drifts under the price column; the whole text is on hover. */
 .stw-why {
   grid-column: 1;
   font-size: 11px;
   color: #8f98a0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.stw-resume {
-  padding-top: 0;
+/* Past the ceiling: shown, counted, and left unticked on purpose. The border
+   says «this one is waiting for you» without hiding anything. */
+.stw-row[data-deep="true"] {
+  border-left-color: #e35a4f;
+  border-left-style: dashed;
 }
 
 .stw-resume[hidden] {
@@ -350,61 +574,7 @@
      them — otherwise a labelled select shoves every plain button downward. */
   align-items: flex-end;
   gap: 8px;
-  padding: 10px 12px 0;
-}
-
-/**
- * A named control. Four rows of anonymous dropdowns is what these tabs used to
- * open with, and the only explanation was a `title` nobody hovers.
- */
-.stw-field {
-  display: flex;
-  flex: 1 1 120px;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-}
-
-.stw-field-narrow {
-  flex: 0 0 auto;
-}
-
-.stw-field-l {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #6a7a86;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.stw-field .stw-select,
-.stw-field .stw-input {
-  width: 100%;
-}
-
-.stw-select,
-.stw-num {
-  border: 1px solid #2a475e;
-  border-radius: 3px;
-  background: #16202d;
-  color: #c7d5e0;
-  padding: 6px 8px;
-  font: inherit;
-}
-
-.stw-select {
-  flex: 1;
-  min-width: 0;
-}
-
-.stw-num {
-  width: 62px;
-}
-
-.stw-num:disabled {
-  opacity: 0.45;
+  padding: 10px 13px 0;
 }
 
 .stw-check {
@@ -413,18 +583,14 @@
   margin-right: 2px;
 }
 
-.stw-row-pick .stw-name {
-  white-space: normal;
-}
-
 .stw-verdict {
-  margin: 0 12px 8px;
-  padding: 8px 10px;
-  border-radius: 3px;
+  margin: 8px 13px 0;
+  padding: 9px 12px;
+  border-radius: 8px;
   font-weight: 700;
   text-align: center;
-  background: #2a475e;
-  color: #c7d5e0;
+  background: var(--stw-bg-lift);
+  color: var(--stw-text);
 }
 
 .stw-verdict[hidden] {
@@ -557,36 +723,41 @@
 .stw-input {
   flex: 1;
   min-width: 0;
-  border: 1px solid #2a475e;
-  border-radius: 3px;
-  background: #16202d;
-  color: #c7d5e0;
-  padding: 6px 8px;
+  border: 1px solid var(--stw-line);
+  border-radius: 6px;
+  background: var(--stw-bg-sunk);
+  color: var(--stw-text);
+  padding: 6px 9px;
   font: inherit;
+  transition: border-color 0.12s ease;
+}
+
+.stw-input:hover {
+  border-color: #37587a;
 }
 
 .stw-input::placeholder {
-  color: #6a7a86;
+  color: var(--stw-faint);
 }
 
-.stw-toggles {
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.stw-toggle {
-  display: inline-flex;
-  align-items: center;
-  font-size: 11px;
-  color: #8f98a0;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
+/**
+ * The per-row action. It sits inside a row, so it must not look like the tab's
+ * own buttons: a quiet chip that only picks up colour when the pointer is on it.
+ */
 .stw-btn-thin {
   flex: 0 0 auto;
-  padding: 4px 9px;
+  padding: 3px 10px;
+  border-radius: 999px;
   font-size: 11px;
+  background: transparent;
+  color: var(--stw-dim);
+  box-shadow: inset 0 0 0 1px var(--stw-line);
+}
+
+.stw-btn-thin:hover:not(:disabled) {
+  background: rgba(102, 192, 244, 0.14);
+  color: var(--stw-white);
+  box-shadow: inset 0 0 0 1px rgba(102, 192, 244, 0.5);
 }
 
 .stw-whyrow {
@@ -598,9 +769,14 @@
 }
 
 .stw-hint {
-  padding: 6px 12px 0;
+  padding: 7px 13px 0;
   font-size: 11px;
-  color: #6a7a86;
+  color: var(--stw-faint);
+}
+
+/** A hint with nothing in it must not pay for the line it would occupy. */
+.stw-hint:empty {
+  display: none;
 }
 
 /**
@@ -649,10 +825,15 @@
   display: flex;
   flex-direction: column;
   gap: 3px;
-  margin: 6px 0;
-  padding: 6px 8px;
-  background: #16202d;
-  border-radius: 3px;
+  margin: 8px 13px 0;
+  padding: 8px 10px;
+  background: var(--stw-bg-sunk);
+  border: 1px solid var(--stw-line-soft);
+  border-radius: 8px;
+}
+
+.stw-ladder[hidden] {
+  display: none;
 }
 
 .stw-ladder-row {
@@ -691,6 +872,10 @@
   width: 8px;
 }
 
+.stw-rows::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 .stw-rows::-webkit-scrollbar-thumb {
   background: #2a475e;
   border-radius: 4px;
@@ -703,10 +888,10 @@
 /* Keyboard users have to see where they are. */
 .stw-btn:focus-visible,
 .stw-tab:focus-visible,
+.stw-stat:focus-visible,
 .stw-iconbtn:focus-visible,
-.stw-input:focus-visible,
-.stw-select:focus-visible {
-  outline: 2px solid #66c0f4;
+.stw-input:focus-visible {
+  outline: 2px solid var(--stw-accent);
   outline-offset: 1px;
 }
 
@@ -750,11 +935,6 @@
   border-radius: 2px;
   background: linear-gradient(90deg, #1a9fff, #66c0f4);
   transition: width 0.4s ease;
-}
-
-/** The bench count is the number that says the factory is actually working. */
-.stw-stat[data-tone="go"] .stw-stat-n {
-  color: #46c06a;
 }
 
 .stw-farm-rows {

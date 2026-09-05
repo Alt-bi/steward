@@ -8,7 +8,19 @@
 import * as scheduler from "../../src/background/scheduler";
 import type { Envelope, NetKind, Protocol } from "../../src/core/messaging";
 
-type Reply = { status: number; body: string; headers?: Record<string, string> };
+/**
+ * `url` + `redirected` exist because `fetch` follows a 302 in silence: a
+ * redirected answer and a refusal arrive as the same HTML, and only these two
+ * fields tell them apart. `Response` makes both read-only, so the shim writes
+ * them on afterwards.
+ */
+type Reply = {
+  status: number;
+  body: string;
+  headers?: Record<string, string>;
+  url?: string;
+  redirected?: boolean;
+};
 type SteamHandler = (url: string, init?: RequestInit) => Reply;
 type Slot = Protocol["net/acquire"]["res"];
 
@@ -223,7 +235,10 @@ g.fetch = async (input: unknown, init?: RequestInit): Promise<Response> => {
   const url = String(input);
   calls.push(url);
   const reply = steam(url, init);
-  return new Response(reply.body, { status: reply.status, headers: reply.headers });
+  const res = new Response(reply.body, { status: reply.status, headers: reply.headers });
+  Object.defineProperty(res, "url", { value: reply.url ?? url });
+  Object.defineProperty(res, "redirected", { value: reply.redirected === true });
+  return res;
 };
 
 export { scheduler };

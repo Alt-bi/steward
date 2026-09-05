@@ -1,12 +1,5 @@
-import { buyerPrice, sellerForBuyer, type FeeConfig } from "../../../core/fees";
-import {
-  describeMissingLevel,
-  levelLabel,
-  levelValue,
-  type PriceLevel,
-} from "../../../core/levels";
+import { buyerPrice, minBuyerPrice, sellerForBuyer, type FeeConfig } from "../../../core/fees";
 import type { CompetitorScan } from "../../../steam/listings";
-import type { HistoryStats } from "../../../steam/pricehistory";
 import type { Settings } from "../../../core/settings";
 import type { Cents, Listing, RepricePlan } from "../../../core/types";
 
@@ -17,9 +10,21 @@ export interface ItemGroup {
   hash: string;
   name: string;
   listings: Listing[];
-  /** Cheapest price a buyer would pay for one of ours. */
+  /** Cheapest price a buyer would pay for one of ours *on this page*. */
   ourLow: Cents;
+  /**
+   * Cheapest lot of this item we hold anywhere, when the whole account has been
+   * read. Undefined means only the page is known — and then a market minimum
+   * below `ourLow` cannot be attributed: it may be our own lot on another page,
+   * and undercutting that is bidding against ourselves.
+   */
+  ourLowAnywhere?: Cents;
   ourListingIds: Set<string>;
+}
+
+/** The cheapest of ours we can actually vouch for. */
+export function ourLowest(group: ItemGroup): Cents {
+  return group.ourLowAnywhere ?? group.ourLow;
 }
 
 /**
@@ -40,13 +45,17 @@ export interface CompetitorLow {
   /** Market minimum including our own listings, when we learned it. */
   marketLow?: Cents | null;
   /**
-   * The listing at `buyer` is known not to be ours.
+   * The lot at `buyer` is known not to be ours.
    *
-   * Only matters on a tie. We recognise our own lots by listing id, and the ids we
-   * have are the ones on this page — so a lot priced exactly like ours may be our
-   * own, sitting on the next page of My Listings. Undercutting that is bidding
-   * against ourselves, so a tie only becomes actionable once Steam has told us the
-   * complete set of our listings.
+   * `false` is a statement, not a missing value: we looked and could not tell.
+   * We recognise our own lots by listing id, and on a page-scoped scan those are
+   * one page of the account — so a lot at or below our own price may be our own,
+   * sitting on the next page of My Listings, and undercutting it is bidding
+   * against ourselves. Nothing is moved against a `false`.
+   *
+   * It becomes true three ways: the listing book flagged the owner of every row,
+   * or Steam has named every listing we hold, or the minimum came from a price
+   * endpoint and we know our cheapest lot of that item across the whole account.
    */
   theirs?: boolean;
 }
@@ -165,7 +174,20 @@ export function groupListings(listings: Listing[]): Map<string, ItemGroup> {
  */
 export function competitorFromMarketLow(group: ItemGroup, marketLow: Cents | null): CompetitorLow {
   if (marketLow == null || marketLow < 1) return { buyer: null, source: "no-price", marketLow: null };
-  if (marketLow < group.ourLow) return { buyer: marketLow, source: "priceoverview", marketLow };
+  if (marketLow < ourLowest(group)) {
+    return {
+      buyer: marketLow,
+      source: "priceoverview",
+      marketLow,
+      /**
+       * A bare number cannot say whose lot it is. It is only proof of a
+       * competitor once it is below every lot we hold — which needs the whole
+       * account, not the page. Without that, this is exactly the number that
+       * would walk our own price down a kopeck at a time.
+       */
+      theirs: group.ourLowAnywhere != null,
+    };
+  }
   return { buyer: null, source: "ours", marketLow };
 }
 
@@ -237,109 +259,27 @@ function priceUnder(ceiling: Cents, publisherFeePercent: number, fees: FeeConfig
   return { targetBuyer: buyerPrice(targetSeller, publisherFeePercent, fees), targetSeller };
 }
 
-/** Where the repricer is aiming. `market` is the classic «just under the cheapest». */
-export interface PlanTarget {
-  level: PriceLevel;
-  /** Group key -> what that item has been selling for. */
-  stats: Record<string, HistoryStats | null>;
-}
-
-const MARKET_TARGET: PlanTarget = { level: "market", stats: {} };
-
 /**
- * Prices a group at a historical level instead of under the competitor.
+ * One rule, applied to every lot on the page: sit one step under the cheapest
+ * listing that is not ours, and never move otherwise.
  *
- * The whole point is that this may move a listing *up*: an item whose market has
- * been walked down a kopeck at a time is worth relisting at what it actually sold
- * for last month and waiting. So none of the «are we already cheapest» rules
- * apply here — the target is an absolute price, not a position in a queue.
+ * There used to be a second target here — the price the item actually sold for
+ * over a week or a month, which could move a lot *up*. It is gone, and with it
+ * the slowest endpoint Steam has. What is left is the thing the tab is for and
+ * the one number it can establish for free: the market minimum, minus our own
+ * lots, minus a kopeck.
  */
-function planAtLevel(
-  group: ItemGroup,
-  low: CompetitorLow,
-  target: PlanTarget,
-  settings: Settings,
-  fees: FeeConfig
-): RepricePlan[] {
-  const plans: RepricePlan[] = [];
-  const label = levelLabel(target.level);
-  const stats = target.stats[group.key] ?? null;
-  const value = levelValue(target.level, low.marketLow ?? low.buyer ?? null, stats);
-
-  if (value.buyer == null) {
-    const why = describeMissingLevel(value);
-    for (const listing of group.listings) plans.push(skip(listing, low.buyer, why, true));
-    return plans;
-  }
-
-  /**
-   * Never under what somebody is already asking. An average below the current
-   * market is a discount nobody is making us give — so the level becomes «just
-   * under the cheapest», and the row says that is what happened.
-   */
-  const floor =
-    low.buyer != null ? low.buyer - Math.max(1, settings.undercutCents) : low.marketLow ?? null;
-  const clamped = floor != null && floor >= 1 && value.buyer < floor;
-  const wanted = clamped ? floor! : value.buyer;
-
-  const ordered = [...group.listings].sort((a, b) => a.ourBuyer - b.ourBuyer);
-  const movable = settings.onePerItem ? ordered.slice(0, 1) : ordered;
-  const held = new Set(movable.map((l) => l.listingId));
-
-  for (const listing of ordered) {
-    if (!held.has(listing.listingId)) {
-      plans.push(skip(listing, low.buyer, "хватит одного лота на предмет"));
-      continue;
-    }
-    if (listing.ourBuyer < 1) {
-      plans.push(skip(listing, low.buyer, "не разобрал цену лота"));
-      continue;
-    }
-    if (!listing.assetid) {
-      plans.push(skip(listing, low.buyer, "не вижу assetid — снимать нельзя, назад не выставлю"));
-      continue;
-    }
-
-    const priced = priceUnder(wanted, listing.publisherFeePercent, fees);
-    if (!priced) {
-      plans.push(skip(listing, low.buyer, "не собралась цена продавца"));
-      continue;
-    }
-    if (priced.targetBuyer === listing.ourBuyer) {
-      plans.push(skip(listing, low.buyer, `уже на уровне «${label}»`));
-      continue;
-    }
-
-    const direction = priced.targetBuyer > listing.ourBuyer ? "вверх" : "вниз";
-    const note = clamped ? ` («${label}» ниже рынка — держим под минимумом)` : "";
-    plans.push({
-      ...skip(listing, low.buyer, `${direction}, до уровня «${label}»${note}`),
-      action: "reprice",
-      targetBuyer: priced.targetBuyer,
-      targetSeller: priced.targetSeller,
-    });
-  }
-
-  return plans;
-}
-
 export function buildPlans(
   groups: Map<string, ItemGroup>,
   lows: Map<string, CompetitorLow>,
   settings: Settings,
-  fees: FeeConfig,
-  target: PlanTarget = MARKET_TARGET
+  fees: FeeConfig
 ): RepricePlan[] {
   const plans: RepricePlan[] = [];
 
   for (const group of groups.values()) {
     const low = lows.get(group.key) ?? { buyer: null, source: "no-price" as const };
     const competitor = low.buyer;
-
-    if (target.level !== "market") {
-      plans.push(...planAtLevel(group, low, target, settings, fees));
-      continue;
-    }
 
     if (competitor == null) {
       /** Only `sole` actually looked; the rest are «did not check», not «fine». */
@@ -361,20 +301,29 @@ export function buildPlans(
      * stranger is a lot that sits there. Reading a tie as a win is what made this
      * report «всё ок» on items that were not selling.
      */
-    const tied = group.ourLow === competitor;
-    if (settings.skipSelfUndercut && group.ourLow < competitor) {
+    const mine = ourLowest(group);
+    const tied = mine === competitor;
+    if (settings.skipSelfUndercut && mine < competitor) {
       for (const listing of group.listings) {
         plans.push(skip(listing, competitor, "мы уже дешевле конкурента"));
       }
       continue;
     }
-    /** A tie we cannot attribute: say so rather than move a lot against ourselves. */
-    if (settings.skipSelfUndercut && tied && !low.theirs) {
-      for (const listing of group.listings) {
-        plans.push(
-          skip(listing, competitor, "делим минимум — не знаю, чей второй лот", true)
-        );
-      }
+    /**
+     * A minimum we cannot attribute is never undercut.
+     *
+     * This is the one rule the whole tab hangs on: the lot at that price may be
+     * our own — on the next page of My Listings, or behind a book that did not
+     * flag its rows — and stepping under it is bidding against ourselves, a
+     * kopeck at a time, every scan. `theirs === false` means we looked and could
+     * not tell, which is not the same as not having looked, and both are answered
+     * the same way here: say so, move nothing.
+     */
+    if (settings.skipSelfUndercut && low.theirs === false) {
+      const why = tied
+        ? "делим минимум — не знаю, чей второй лот"
+        : "минимум ниже нашего, но чей он — не проверил";
+      for (const listing of group.listings) plans.push(skip(listing, competitor, why, true));
       continue;
     }
 
@@ -419,7 +368,19 @@ export function buildPlans(
 
       const priced = priceUnder(ceiling, listing.publisherFeePercent, fees);
       if (!priced) {
-        plans.push(skip(listing, competitor, "не собралась цена продавца"));
+        /**
+         * The floor is the usual reason, and it deserves its own sentence: a
+         * card already at 2,61 ₽ is not «не посчиталось», it is as cheap as
+         * Steam allows, and every scan would otherwise offer to move it again.
+         */
+        const floor = minBuyerPrice(listing.publisherFeePercent, fees);
+        plans.push(
+          skip(
+            listing,
+            competitor,
+            ceiling < floor ? "дно рынка — дешевле Steam не примет" : "не собралась цена продавца"
+          )
+        );
         continue;
       }
       if (priced.targetBuyer >= listing.ourBuyer) {

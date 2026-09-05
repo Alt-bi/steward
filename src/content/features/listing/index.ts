@@ -101,7 +101,7 @@ function money(cents: Cents | null | undefined): string {
 }
 
 const BUY_ERRORS: Record<string, string> = {
-  over_the_limit: "цена выше лимита быстрой покупки — подними его в настройках, если это осознанно",
+  over_the_limit: "цена выше лимита быстрой покупки — такой лот покупай на странице Steam",
   price_does_not_add_up: "цена и комиссия не сходятся с суммой — покупка отменена",
   bad_price: "Steam отдал бессмысленную цену — покупка отменена",
 };
@@ -159,39 +159,50 @@ async function mount(ctx: FeatureContext): Promise<void> {
   const ladderBox = el("div", "stw-ladder");
   ladderBox.hidden = true;
 
-  const actions = el("div", "stw-actions");
+  /** Checking is where every visit starts, so it gets the width. */
+  const actions = el("div", "stw-actions stw-actions-main");
   const checkBtn = el("button", "stw-btn stw-btn-primary", "Посмотреть цену");
   checkBtn.type = "button";
-  const buyBtn = el("button", "stw-btn stw-btn-go", "Купить дешёвый");
+  actions.append(checkBtn);
+
+  const actionsRest = el("div", "stw-actions stw-actions-rest");
+  const buyBtn = el("button", "stw-btn stw-btn-go", "Купить самый дешёвый");
   buyBtn.type = "button";
   buyBtn.disabled = true;
   const stopBtn = el("button", "stw-btn", "Стоп");
   stopBtn.type = "button";
   stopBtn.disabled = true;
-  actions.append(checkBtn, buyBtn, stopBtn);
+  actionsRest.append(buyBtn, stopBtn);
 
   const rows = el("div", "stw-rows");
-  section.body.append(stats, verdictBox, ladderBox, chartBox, actions, rows);
+  section.body.append(stats, verdictBox, ladderBox, chartBox, actions, actionsRest, rows);
 
   let phase = "";
   let phaseKind: StatusKind = "";
+  /** What qualifies the answer, folded away under «подробнее». */
+  let phaseDetail = "";
   let pauseUntil = 0;
   let pauseReason: WaitReason = "budget";
 
   function render(): void {
     const left = pauseUntil - Date.now();
     if (left <= 0) {
-      section.setStatus(phase, phaseKind);
+      section.setStatus(phase, phaseKind, phaseDetail);
       return;
     }
     const secs = Math.ceil(left / 1000);
     const note = pauseReason === "cooldown" ? `лимит Steam ${secs}с` : `бюджет запросов ${secs}с`;
-    section.setStatus(`${phase} · ${note}`, pauseReason === "cooldown" ? "warn" : phaseKind);
+    section.setStatus(
+      `${phase} · ${note}`,
+      pauseReason === "cooldown" ? "warn" : phaseKind,
+      phaseDetail
+    );
   }
 
-  function status(text: string, kind: StatusKind = ""): void {
+  function status(text: string, kind: StatusKind = "", detail = ""): void {
     phase = text;
     phaseKind = kind;
+    phaseDetail = detail;
     pauseUntil = 0;
     render();
   }
@@ -432,11 +443,16 @@ async function mount(ctx: FeatureContext): Promise<void> {
           ? []
           : await fetchCheapestListings(
               state.appid,
-              /** The name Steam answers to, which on a grouped page is the group. */
-              page?.itemName ?? urlName,
+              /**
+               * The hash, not the page's `itemName`. Measured 2026-09-03:
+               * `/render/` answers by `market_hash_name` even for a wear
+               * variant — 1201 listings deep for a Redline FT — so the group
+               * id the rewritten page carries buys nothing and names a URL
+               * the classic endpoint does not serve.
+               */
+              state.hash || urlName,
               pacing,
-              10,
-              state.hash
+              10
             );
 
       /**
@@ -494,10 +510,10 @@ async function mount(ctx: FeatureContext): Promise<void> {
          * of them — so the honest output is none of them.
          */
         status(
-          `Страница стоит на группе «${urlName}», а какой предмет она показывает — Steam ` +
-            "не назвал. Цифры по группе смешивают разные предметы, поэтому не считаю их. " +
-            "Открой конкретный износ из списка на странице.",
-          "warn"
+          "Страница стоит на группе — открой конкретный износ из списка",
+          "warn",
+          `Какой предмет группы «${urlName}» она показывает, Steam не назвал. Цифры по ` +
+            "группе смешивают разные предметы, поэтому я их не считаю."
         );
       } else if (!state.listings.length && state.marketLow != null) {
         /**
@@ -506,16 +522,16 @@ async function mount(ctx: FeatureContext): Promise<void> {
          * button works, so say what is missing rather than what is broken.
          */
         status(
-          `${scope}Минимум ${money(state.marketLow)}. Отдельные лоты Steam на этой странице ` +
-            "не показал — покупка в один клик недоступна.",
-          "warn"
+          `${scope}Минимум ${money(state.marketLow)}`,
+          "warn",
+          "Отдельные лоты Steam на этой странице не показал — покупка в один клик недоступна."
         );
       } else if (!state.listings.length) {
         status(`${scope}Лотов на продажу нет.`, "warn");
       } else if (!state.history.length) {
         status(`${scope}Цены есть, истории продаж Steam не дал.`, "warn");
       } else {
-        status(`${scope}Готово. Продаж за месяц: ${state.stats.volume30d}.`, "ok");
+        status(`${scope}Продаж за месяц ${state.stats.volume30d}`, "ok");
       }
     } catch (err) {
       status(`Цена: ${describeError(err, { empty: "Steam не отдал историю продаж" })}`, "err");
@@ -557,9 +573,10 @@ async function mount(ctx: FeatureContext): Promise<void> {
     }
     if (listing.buyer > cap) {
       status(
-        `${money(listing.buyer)} дороже лимита быстрой покупки ${money(cap)}. ` +
-          "Подними лимит в настройках, если это осознанно.",
-        "warn"
+        `${money(listing.buyer)} дороже лимита быстрой покупки ${money(cap)}`,
+        "warn",
+        "Лимит фиксированный: он держит опечатку в одном клике от кошелька. " +
+          "Такой лот покупай на самой странице Steam."
       );
       return;
     }
@@ -586,7 +603,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
         cap,
         pacing
       );
-      status(`Куплено за ${money(listing.buyer)}. Обнови страницу, чтобы увидеть в инвентаре.`, "ok");
+      status(`Куплено за ${money(listing.buyer)}`, "ok", "Обнови страницу, чтобы увидеть предмет в инвентаре.");
       state.listings = state.listings.slice(1);
       renderAll();
     } catch (err) {

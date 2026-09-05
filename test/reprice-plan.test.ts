@@ -11,11 +11,9 @@ import {
   type CompetitorLow,
 } from "../src/content/features/reprice/plan";
 import type { CompetitorScan } from "../src/steam/listings";
-import { buyerPrice, DEFAULT_FEES } from "../src/core/fees";
+import { buyerPrice, DEFAULT_FEES, feesFromWallet } from "../src/core/fees";
 import { DEFAULT_SETTINGS, type Settings } from "../src/core/settings";
-import type { PriceLevel } from "../src/core/levels";
 import type { Cents, Listing } from "../src/core/types";
-import type { HistoryStats } from "../src/steam/pricehistory";
 
 const fees = DEFAULT_FEES;
 
@@ -34,15 +32,26 @@ function listing(id: string, hash: string, buyer: Cents): Listing {
   };
 }
 
+/**
+ * `ourLowAnywhere` is what one `mylistings` walk teaches: our cheapest lot of
+ * this item across the whole account, not just the page. The scan learns it
+ * before acting on a bare market minimum, because without it that number cannot
+ * be told from our own lot on the next page. Pass `false` for the runs that
+ * never learned it.
+ */
 function planFromMarketLow(
   listings: Listing[],
   marketLow: Cents | null,
-  overrides: Partial<Settings> = {}
+  overrides: Partial<Settings> = {},
+  knowAllOurs: Cents | true | false = true
 ) {
   const settings = { ...DEFAULT_SETTINGS, ...overrides };
   const groups = groupListings(listings);
   const lows = new Map<string, CompetitorLow>();
-  for (const g of groups.values()) lows.set(g.key, competitorFromMarketLow(g, marketLow));
+  for (const g of groups.values()) {
+    if (knowAllOurs !== false) g.ourLowAnywhere = knowAllOurs === true ? g.ourLow : knowAllOurs;
+    lows.set(g.key, competitorFromMarketLow(g, marketLow));
+  }
   return { groups, lows, plans: buildPlans(groups, lows, settings, fees) };
 }
 
@@ -64,11 +73,36 @@ const repriced = (plans: ReturnType<typeof planFromCompetitor>) =>
   plans.filter((p) => p.action === "reprice");
 
 describe("competitorFromMarketLow", () => {
-  it("trusts a market low that sits below our cheapest listing", () => {
+  it("trusts a market low that sits below every lot we hold", () => {
+    const groups = groupListings([listing("1", "AK", 10000)]);
+    const group = [...groups.values()][0]!;
+    group.ourLowAnywhere = group.ourLow;
+    const low = competitorFromMarketLow(group, 9000);
+    assert.equal(low.buyer, 9000);
+    assert.equal(low.source, "priceoverview");
+    assert.equal(low.theirs, true);
+  });
+
+  it("will not call a number a competitor while our own lots are unknown", () => {
+    /**
+     * The page is ten rows of an account with seven hundred. A minimum below
+     * the cheapest of those ten is very often our own lot on another page, and
+     * stepping under it walks our own price down a kopeck per scan.
+     */
     const groups = groupListings([listing("1", "AK", 10000)]);
     const low = competitorFromMarketLow([...groups.values()][0]!, 9000);
     assert.equal(low.buyer, 9000);
-    assert.equal(low.source, "priceoverview");
+    assert.equal(low.theirs, false, "мы не знаем, чей это лот");
+  });
+
+  it("calls the minimum ours when our own cheaper lot is what is holding it", () => {
+    /** Page shows our 100; the account also holds one at 90, and 90 is the market low. */
+    const groups = groupListings([listing("1", "AK", 10000)]);
+    const group = [...groups.values()][0]!;
+    group.ourLowAnywhere = 9000;
+    const low = competitorFromMarketLow(group, 9000);
+    assert.equal(low.buyer, null);
+    assert.equal(low.source, "ours");
   });
 
   it("refuses to call our own listing a competitor", () => {
@@ -96,6 +130,13 @@ describe("buildPlans", () => {
     assert.equal(moved[0]!.listingId, "1");
     assert.ok(moved[0]!.targetBuyer! < 9000);
     assert.ok(moved[0]!.targetBuyer! >= 8900, "undercut by a kopeck, not by a rouble");
+  });
+
+  it("moves nothing against a minimum it cannot attribute", () => {
+    const { plans } = planFromMarketLow([listing("1", "AK", 10000)], 9000, {}, false);
+    assert.equal(repriced(plans).length, 0, "подрезать неизвестно чей лот нельзя");
+    assert.equal(plans[0]!.unverified, true);
+    assert.match(plans[0]!.reason, /чей он — не проверил/);
   });
 
   it("never undercuts itself when we already hold the minimum", () => {
@@ -228,6 +269,8 @@ function scan(over: Partial<CompetitorScan> = {}): CompetitorScan {
     competitor: null,
     seen: 0,
     allOurs: false,
+    rows: [],
+    truncated: false,
     crowded: false,
     flagged: false,
     unnamed: false,
@@ -306,115 +349,6 @@ describe("a minimum the listing book confirmed is ours alone", () => {
   });
 });
 
-function history(over: Partial<HistoryStats> = {}): HistoryStats {
-  return {
-    points: 400,
-    last: 10000,
-    lastAt: Date.now(),
-    average7d: 9000,
-    average30d: 11000,
-    average365d: 15000,
-    min30d: 8000,
-    max30d: 13000,
-    volume7d: 40,
-    volume30d: 200,
-    volume365d: 2400,
-    spanDays: 500,
-    ...over,
-  };
-}
-
-function planAtLevel(
-  listings: Listing[],
-  level: PriceLevel,
-  low: CompetitorLow,
-  stats: HistoryStats | null,
-  over: Partial<Settings> = {}
-) {
-  const settings = { ...DEFAULT_SETTINGS, ...over };
-  const groups = groupListings(listings);
-  const lows = new Map<string, CompetitorLow>();
-  const statsByKey: Record<string, HistoryStats | null> = {};
-  for (const g of groups.values()) {
-    lows.set(g.key, low);
-    statsByKey[g.key] = stats;
-  }
-  return buildPlans(groups, lows, settings, fees, { level, stats: statsByKey });
-}
-
-describe("pricing at a historical level", () => {
-  const onMarket: CompetitorLow = { buyer: 9000, source: "listings", marketLow: 9000, theirs: true };
-
-  it("moves a listing up to what the month says it is worth", () => {
-    const plans = planAtLevel([listing("1", "AK", 9500)], "avg30", onMarket, history());
-    const moved = repriced(plans);
-    assert.equal(moved.length, 1, "repricing is not only ever downwards");
-    assert.ok(moved[0]!.targetBuyer! > 9500);
-    assert.ok(moved[0]!.targetBuyer! <= 11000);
-    assert.match(moved[0]!.reason, /вверх/);
-  });
-
-  it("moves it down when the year says we are asking too much", () => {
-    const plans = planAtLevel([listing("1", "AK", 40000)], "avg365", onMarket, history());
-    const moved = repriced(plans);
-    assert.equal(moved.length, 1);
-    assert.ok(moved[0]!.targetBuyer! < 40000);
-    assert.match(moved[0]!.reason, /вниз/);
-  });
-
-  it("holds above the market when the average sits below it", () => {
-    /** Competitor at 200.00, month average 110.00: pricing at the average is a gift. */
-    const rich: CompetitorLow = { buyer: 20000, source: "listings", marketLow: 20000, theirs: true };
-    const plans = planAtLevel([listing("1", "AK", 30000)], "avg30", rich, history());
-    const moved = repriced(plans);
-    assert.equal(moved.length, 1);
-    assert.ok(moved[0]!.targetBuyer! < 20000, "still under the competitor");
-    assert.ok(moved[0]!.targetBuyer! > 11000, "but nowhere near the average");
-    assert.match(moved[0]!.reason, /ниже рынка/);
-  });
-
-  it("ignores «we already hold the minimum» — the target is a price, not a place", () => {
-    const ours: CompetitorLow = { buyer: null, source: "sole", marketLow: 9000 };
-    const plans = planAtLevel([listing("1", "AK", 9000)], "avg30", ours, history());
-    assert.equal(repriced(plans).length, 1, "cheapest on the market is not «done» here");
-  });
-
-  it("refuses to move anything on a level it cannot compute, and says so", () => {
-    const plans = planAtLevel([listing("1", "AK", 9500)], "avg365", onMarket, history({ spanDays: 12 }));
-    assert.equal(repriced(plans).length, 0);
-    assert.equal(plans[0]!.unverified, true);
-    assert.match(plans[0]!.reason, /истории меньше/);
-  });
-
-  it("still refuses a listing with no assetid, for the same one-way reason", () => {
-    const blind = { ...listing("1", "AK", 9500), assetid: "" };
-    const plans = planAtLevel([blind], "avg30", onMarket, history());
-    assert.equal(repriced(plans).length, 0);
-    assert.match(plans[0]!.reason, /assetid/);
-  });
-
-  it("still moves one lot per item", () => {
-    const plans = planAtLevel(
-      [listing("1", "AK", 9500), listing("2", "AK", 9600)],
-      "avg30",
-      onMarket,
-      history()
-    );
-    assert.equal(repriced(plans).length, 1);
-  });
-
-  it("leaves a listing already sitting on the level alone", () => {
-    const moved = repriced(planAtLevel([listing("1", "AK", 9500)], "avg30", onMarket, history()));
-    const settled = planAtLevel(
-      [listing("1", "AK", moved[0]!.targetBuyer!)],
-      "avg30",
-      onMarket,
-      history()
-    );
-    assert.equal(repriced(settled).length, 0);
-    assert.match(settled[0]!.reason, /уже на уровне/);
-  });
-});
 
 describe("BookLiveness", () => {
   it("treats one markup answer as weather, not a dead endpoint", () => {
@@ -485,5 +419,46 @@ describe("BookLiveness", () => {
     assert.equal(live.lastMarkup, "Steam Error");
     live.restart();
     assert.equal(live.lastMarkup, "");
+  });
+});
+
+/**
+ * The market floor, which is where half a card account lives.
+ *
+ * Five of the ten lots drawn on /market on 2026-09-03 sat at 2,61 ₽ with a
+ * stranger’s lot at the same price. Undercutting by a kopeck is arithmetic
+ * that has an answer and Steam has no listing for: 2,60 cannot be sold. The
+ * plan has to say so, once, instead of offering the move again every scan.
+ */
+describe("a lot already at the market floor", () => {
+  const rub = feesFromWallet({
+    wallet_fee_percent: "0.05",
+    wallet_fee_minimum: "87",
+    wallet_fee_base: "0",
+    wallet_market_minimum: "87",
+    wallet_publisher_fee_percent_default: "0.10",
+  });
+
+  it("is left alone, and says why", () => {
+    const groups = groupListings([listing("1", "12360-Tradin' Paint", 261)]);
+    const lows = new Map<string, CompetitorLow>();
+    for (const g of groups.values()) {
+      lows.set(g.key, { buyer: 261, source: "listings", theirs: true });
+    }
+    const plans = buildPlans(groups, lows, DEFAULT_SETTINGS, rub);
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0]!.action, "skip");
+    assert.match(plans[0]!.reason ?? "", /дно рынка/);
+  });
+
+  it("still moves a lot that has room above the floor", () => {
+    const groups = groupListings([listing("1", "597090-Enemy Drone-Shot (Foil)", 8736)]);
+    const lows = new Map<string, CompetitorLow>();
+    for (const g of groups.values()) {
+      lows.set(g.key, { buyer: 8689, source: "listings", theirs: true });
+    }
+    const plans = buildPlans(groups, lows, DEFAULT_SETTINGS, rub);
+    assert.equal(plans[0]!.action, "reprice");
+    assert.equal(plans[0]!.targetBuyer, 8688, "a kopeck under the stranger, and legal");
   });
 });

@@ -9,7 +9,15 @@ export type StatusKind = "" | "work" | "ok" | "warn" | "err";
 export interface Section {
   readonly id: string;
   readonly body: HTMLElement;
-  setStatus(text: string, kind?: StatusKind): void;
+  /**
+   * The headline, and everything that qualifies it.
+   *
+   * A run has one result and several caveats, and printing them as one
+   * paragraph buries the result: four lines of text where the sentence that
+   * matters is the first eight words. `detail` folds away under «подробнее»,
+   * closed, until someone wants it.
+   */
+  setStatus(text: string, kind?: StatusKind, detail?: string): void;
   show(): void;
 }
 
@@ -28,36 +36,18 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
-/**
- * A control with its name written over it.
- *
- * The market and inventory tabs were rows of anonymous selects and number
- * boxes whose only explanation was a `title` — and nobody hovers a dropdown to
- * find out what it does. The label costs one line of markup and turns four
- * stacked control rows into something readable top to bottom.
- */
-export function field(label: string, control: HTMLElement, title?: string): HTMLElement {
-  const wrap = el("div", "stw-field");
-  if (title) wrap.title = title;
-  wrap.append(el("span", "stw-field-l", label), control);
-  return wrap;
-}
-
-/** The same, for a control that must stay its own narrow width (a number box). */
-export function narrowField(label: string, control: HTMLElement, title?: string): HTMLElement {
-  const wrap = field(label, control, title);
-  wrap.classList.add("stw-field-narrow");
-  return wrap;
-}
-
 export class Panel {
   readonly root: HTMLElement;
   private readonly tabsBar: HTMLElement;
   private readonly stack: HTMLElement;
-  private readonly sections = new Map<string, { tab: HTMLButtonElement; wrap: HTMLElement }>();
+  private readonly subtitle: HTMLElement;
+  private readonly sections = new Map<
+    string,
+    { tab: HTMLButtonElement; wrap: HTMLElement; title: string }
+  >();
   private active: string | null = null;
 
-  constructor(subtitle: string) {
+  constructor() {
     this.root = el("div", "stw-panel");
     this.root.id = ROOT_ID;
 
@@ -66,15 +56,30 @@ export class Panel {
     /**
      * The version belongs in the corner the user actually looks at. Without it,
      * a session running a build from before a fix reports that fix's bugs
-     * verbatim — every "still broken" report is a version check first.
+     * verbatim — every "still broken" report is a version check first. It is a
+     * footnote to the name, not a second heading, so it is written like one.
      */
-    const version = chrome.runtime.getManifest().version;
-    titles.append(el("div", "stw-title", `Steward ${version}`), el("div", "stw-sub", subtitle));
+    const title = el("div", "stw-title");
+    title.append(
+      document.createTextNode("Steward"),
+      el("span", "stw-ver", chrome.runtime.getManifest().version)
+    );
+    /**
+     * The subtitle used to list the tabs — the same words the tab bar under it
+     * was already showing, in a quieter colour. It now names the section only
+     * when there is no tab bar to name it.
+     */
+    this.subtitle = el("div", "stw-sub", "");
+    titles.append(title, this.subtitle);
 
     const collapse = el("button", "stw-iconbtn", "–");
     collapse.type = "button";
     collapse.title = "Свернуть";
-    collapse.addEventListener("click", () => this.root.classList.toggle("stw-collapsed"));
+    collapse.addEventListener("click", () => {
+      const folded = this.root.classList.toggle("stw-collapsed");
+      collapse.textContent = folded ? "+" : "–";
+      collapse.title = folded ? "Развернуть" : "Свернуть";
+    });
 
     head.append(titles, collapse);
 
@@ -95,6 +100,14 @@ export class Panel {
     wrap.hidden = true;
 
     const status = el("div", "stw-status");
+    const statusLine = el("div", "stw-status-line");
+    const statusMore = document.createElement("details");
+    statusMore.className = "stw-status-more";
+    const statusSummary = el("summary", "stw-status-summary", "подробнее");
+    const statusDetail = el("div", "stw-status-detail");
+    statusMore.append(statusSummary, statusDetail);
+    statusMore.hidden = true;
+    status.append(statusLine, statusMore);
     const body = el("div", "stw-body");
     wrap.append(status, body);
     this.stack.appendChild(wrap);
@@ -104,28 +117,35 @@ export class Panel {
     tab.addEventListener("click", () => this.activate(id));
     this.tabsBar.appendChild(tab);
 
-    this.sections.set(id, { tab, wrap });
+    this.sections.set(id, { tab, wrap, title });
     this.tabsBar.hidden = this.sections.size < 2;
-    if (!this.active) this.activate(id);
+    this.activate(this.active ?? id);
 
     return {
       id,
       body,
-      setStatus: (text, kind) => {
-        status.textContent = text;
+      setStatus: (text, kind, detail) => {
+        statusLine.textContent = text;
         status.dataset.kind = kind ?? "";
+        statusDetail.textContent = detail ?? "";
+        statusMore.hidden = !detail;
+        /** A new answer is a new question: never leave yesterday’s notes open. */
+        if (!detail) statusMore.open = false;
       },
       show: () => this.activate(id),
     };
   }
 
   private activate(id: string): void {
+    let name = "";
     for (const [key, entry] of this.sections) {
       const on = key === id;
       entry.wrap.hidden = !on;
       entry.tab.classList.toggle("stw-tab-on", on);
+      if (on) name = entry.title;
     }
     this.active = id;
+    this.subtitle.textContent = this.tabsBar.hidden ? name : "";
   }
 
   /** Keeps the panel where the user last put it, per browser profile. */

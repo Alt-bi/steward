@@ -30,8 +30,16 @@ export const DEFAULT_PRICE_TTL_MS = 15 * 60_000;
 /** Below this, one query returns one item and search only adds a round trip. */
 const MIN_BATCHING_RATIO = 1.2;
 
-/** Groups to try before judging whether search is finding anything at all. */
-const SEARCH_SAMPLE = 6;
+/**
+ * Groups to try before judging whether search is finding anything at all.
+ *
+ * Three, not six. Measured 2026-09-03: `search/render?query=<card hash>`
+ * answers `total_count: 0` for trading cards — their hashes are not names the
+ * search index matches — so a page of cards paid six requests to learn nothing
+ * and then paid again through `priceoverview`. The sample only has to be big
+ * enough to tell «this batch does not match» from bad luck.
+ */
+const SEARCH_SAMPLE = 3;
 
 /** Fraction of sampled groups that must match, or we stop trusting search. */
 const SEARCH_MIN_HIT_RATE = 0.3;

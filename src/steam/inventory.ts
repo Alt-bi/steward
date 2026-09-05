@@ -1,4 +1,4 @@
-import type { TileRef } from "../core/tiles";
+import { isHiddenInventoryPage, type TileRef } from "../core/tiles";
 import type { AppContextData, Cents, ItemKeyed, PageVisibleItem, SteamAsset, SteamAssetIndex } from "../core/types";
 import { fetchJsonRetry, SteamError, type Pacing } from "./net";
 import { lookupAsset } from "./page-context";
@@ -84,9 +84,9 @@ function descriptionKey(classid: unknown, instanceid: unknown): string {
  * Joins the two arrays. Pulled out from the fetch so the join rules — which are
  * where the surprises live — can be tested without a network call.
  */
-export function mergeInventory(payload: InventoryResponse): InventoryItem[] {
-  const assets = payload.assets ?? [];
-  const descriptions = payload.descriptions ?? [];
+export function mergeInventory(payload: InventoryResponse | null | undefined): InventoryItem[] {
+  const assets = payload?.assets ?? [];
+  const descriptions = payload?.descriptions ?? [];
 
   const byKey = new Map<string, RawDescription>();
   for (const d of descriptions) byKey.set(descriptionKey(d.classid, d.instanceid), d);
@@ -293,22 +293,47 @@ export interface InventoryTarget {
   contextid: string;
 }
 
+export interface InventoryOwner {
+  steamid: string;
+  /** True when nothing stated the owner and we fell back to the viewer. */
+  assumed: boolean;
+  /**
+   * The viewer owns what is on screen — the only state in which listing an item
+   * is a thing that can work.
+   *
+   * Never true on a guess. `sellitem` is sent with our session against an asset
+   * id read off the page, so on a friend's backpack the panel would build a
+   * perfectly well-formed order for items we do not have; Steam refuses it, and
+   * the refusal reads as our bug. A button that cannot work on this page is not
+   * a disabled button, it is the wrong button.
+   */
+  mine: boolean;
+}
+
 /**
  * Whose inventory the page is showing.
  *
- * `/profiles/{steamid}/inventory` says it outright. A vanity `/id/{name}/inventory`
- * does not, and the page global only tells us who is *logged in* — so on someone
- * else's vanity URL we would happily read our own inventory instead. Returning the
- * viewer with `assumed: true` lets the caller say so out loud.
+ * Three sources, best first. `g_rgProfileData.steamid` is the page naming its
+ * own owner and is the only one that survives a vanity URL.
+ * `/profiles/{steamid}/inventory` says it outright too. A vanity
+ * `/id/{name}/inventory` with no page data says nothing at all, and the viewer
+ * global answers a different question — who is logged in — so that case is
+ * `assumed` and never counts as ours.
  */
 export function ownerFromUrl(
   pathname: string,
-  viewerSteamId: string
-): { steamid: string; assumed: boolean } | null {
+  viewerSteamId: string,
+  profileSteamId?: string | null
+): InventoryOwner | null {
+  const mine = (steamid: string): boolean => Boolean(viewerSteamId) && steamid === viewerSteamId;
+  const stated = typeof profileSteamId === "string" && /^\d{5,}$/.test(profileSteamId)
+    ? profileSteamId
+    : null;
+  if (stated) return { steamid: stated, assumed: false, mine: mine(stated) };
   const explicit = pathname.match(/\/profiles\/(\d{5,})/);
-  if (explicit?.[1]) return { steamid: explicit[1], assumed: false };
+  if (explicit?.[1]) return { steamid: explicit[1], assumed: false, mine: mine(explicit[1]) };
   if (!viewerSteamId) return null;
-  return { steamid: viewerSteamId, assumed: true };
+  return { steamid: viewerSteamId, assumed: true, mine: false };
 }
 
 /**
@@ -331,6 +356,118 @@ export function targetFromHash(hash: string, steamid: string): InventoryTarget |
   const m = hash.match(/#(\d+)_(\d+)/);
   if (!m || !m[1] || !m[2]) return null;
   return { steamid, appid: Number(m[1]), contextid: m[2] };
+}
+
+/**
+ * The backpacks the inventory page has drawn, read off the ids it drew them under.
+ *
+ * Steam wraps each loaded inventory in `#inventory_{steamid}_{appid}_{contextid}`
+ * and hides all but the open one. That single id answers both questions this tab
+ * kept getting wrong: whose items these are — stated by the page, so it survives
+ * a vanity URL with no `g_rgProfileData` — and which game is on screen, which the
+ * URL fragment only knows after the user has clicked a game at least once.
+ *
+ * It can only ever add: a markup change makes this return nothing and every
+ * caller falls back to what it used before. Nothing here decides that a backpack
+ * is ours — that still needs the id to equal the logged-in one.
+ */
+export interface PageInventory {
+  steamid: string;
+  appid: number;
+  contextid: string;
+  /** The open one. Steam keeps the others in the document with `display: none`. */
+  shown: boolean;
+}
+
+const CONTAINER_ID = /^inventory_(\d{5,})_(\d+)_(\d+)$/;
+
+export function inventoriesOnPage(root: ParentNode): PageInventory[] {
+  let nodes: Element[];
+  try {
+    nodes = [...root.querySelectorAll('[id^="inventory_"]')];
+  } catch {
+    return [];
+  }
+  const out: PageInventory[] = [];
+  const seen = new Set<string>();
+  for (const node of nodes) {
+    const id = node.getAttribute("id") ?? "";
+    const m = CONTAINER_ID.exec(id);
+    if (!m || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      steamid: m[1]!,
+      appid: Number(m[2]),
+      contextid: m[3]!,
+      shown: !isHiddenInventoryPage(node),
+    });
+  }
+  return out;
+}
+
+/**
+ * Whose backpack the page drew, when every container agreed on one owner.
+ *
+ * Disagreement cannot happen on a real page, and if it ever does the honest
+ * answer is «I do not know» rather than the first one in document order.
+ */
+export function ownerFromPage(drawn: readonly PageInventory[]): string | null {
+  const first = drawn[0]?.steamid ?? null;
+  if (!first) return null;
+  return drawn.every((inv) => inv.steamid === first) ? first : null;
+}
+
+export interface ActiveInventory {
+  hash: string;
+  steamid: string;
+  drawn: readonly PageInventory[];
+  tiles: readonly TileRef[];
+  contexts: readonly InventoryChoice[];
+}
+
+/** The game the page is showing, best-stated source first. */
+function activeAppid(input: ActiveInventory): number | null {
+  const fromHash = appidFromHash(input.hash);
+  if (fromHash) return fromHash;
+  const open = input.drawn.find((inv) => inv.shown);
+  if (open) return open.appid;
+  return input.tiles[0]?.appid ?? input.drawn[0]?.appid ?? null;
+}
+
+/**
+ * Every inventory to read for «the game that is open right now».
+ *
+ * The fragment alone was not enough and never had been: Steam writes `#730_2`
+ * when a game is *clicked*, so a tab opened straight onto an inventory — or
+ * restored by the browser — has no fragment at all, and «Оценить всё» answered
+ * a freshly opened inventory with «сначала выбери игру» while the game sat
+ * drawn on the screen behind the panel.
+ *
+ * So the fragment is only the first of four sources, and the rest read what is
+ * actually on screen. One game can hold several contexts — CS2 draws 2 and 16
+ * side by side — and «весь инвентарь по этой игре» means all of them, so this
+ * answers with a list rather than with the first one it found.
+ */
+export function activeTargets(input: ActiveInventory): InventoryTarget[] {
+  const { steamid } = input;
+  if (!steamid) return [];
+
+  const appid = activeAppid(input);
+  if (appid == null || !Number.isFinite(appid) || appid <= 0) return [];
+
+  const contextids: string[] = [];
+  const add = (id: string | undefined): void => {
+    if (id && !contextids.includes(id)) contextids.push(id);
+  };
+
+  const exact = targetFromHash(input.hash, steamid);
+  if (exact?.appid === appid) add(exact.contextid);
+  for (const inv of input.drawn) if (inv.appid === appid && inv.shown) add(inv.contextid);
+  for (const tile of input.tiles) if (tile.appid === appid) add(tile.contextid);
+  for (const inv of input.drawn) if (inv.appid === appid) add(inv.contextid);
+  for (const choice of input.contexts) if (choice.appid === appid) add(choice.contextid);
+
+  return contextids.map((contextid) => ({ steamid, appid, contextid }));
 }
 
 export interface LoadInventoryResult {
@@ -414,12 +551,21 @@ export async function loadInventory(
 
     const url: string = inventoryPageUrl(target, startAssetId);
 
-    const data: InventoryResponse = await fetchJsonRetry<InventoryResponse>(url, {
+    const data: InventoryResponse | null = await fetchJsonRetry<InventoryResponse | null>(url, {
       kind: "inventory",
       abort: pacing.abort,
       onWait: pacing.onWait,
     });
     pages += 1;
+    /**
+     * A context Steam will not open answers with a bare `null` — measured
+     * 2026-09-05 on `753/1`, the gift context, which `g_rgAppContextData`
+     * nonetheless lists with a count. Reading `total_inventory_count` off that
+     * threw and took the whole run down with it, so a game whose contexts are
+     * read as a set could be killed by the one of them that holds nothing worth
+     * having. An empty answer is an empty inventory, not a failure.
+     */
+    if (!data) break;
     if (!total) total = data.total_inventory_count ?? 0;
 
     for (const item of mergeInventory(data)) {

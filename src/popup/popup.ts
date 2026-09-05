@@ -45,27 +45,23 @@ function amount(cents: number): string {
 }
 
 /**
- * The standard, read out of the constant rather than typed into the markup.
+ * The three numbers a person opening this actually wants.
  *
- * The point of the list is that nothing is hidden — a fixed value the owner
- * cannot see is the same as a value they cannot trust. Reading it from
- * `FIXED_SETTINGS` is what keeps the promise true: change the number and this
- * page says the new one, with no second place to forget.
+ * There were ten, read out of `FIXED_SETTINGS` on the principle that a fixed
+ * value nobody can see is no better than one nobody can trust. The principle
+ * stands; the list was still an engineering sheet. «Запросов цен разом: 2» and
+ * «Точный минимум книги: спрашиваем» answer questions the owner has never
+ * asked, and burying the pause and the purchase ceiling among them is how the
+ * two that matter stopped being read.
+ *
+ * What is left is how fast we write, how far we undercut, and the most a click
+ * can ever spend. The other seven are in the README, where the reasoning that
+ * makes them the right answers lives too.
  */
 function fillStandard(): void {
   const rows: readonly [string, string][] = [
     ["Пауза между записями", `${(FIXED_SETTINGS.delayMs / 1000).toFixed(1).replace(".", ",")} с`],
     ["Ниже конкурента", `${FIXED_SETTINGS.undercutCents} коп.`],
-    ["Глубже не двигаем", `${FIXED_SETTINGS.maxDropPercent}%`],
-    ["Свой лот за конкурента", FIXED_SETTINGS.skipSelfUndercut ? "не считаем" : "считаем"],
-    ["Лотов одного предмета за проход", FIXED_SETTINGS.onePerItem ? "один" : "все"],
-    [
-      "Откуда цены",
-      FIXED_SETTINGS.priceSource === "search" ? "поиск маркета, пачками" : "priceoverview",
-    ],
-    ["Цена свежая", `${FIXED_SETTINGS.priceTtlMinutes} мин`],
-    ["Запросов цен разом", String(FIXED_SETTINGS.scanConcurrency)],
-    ["Точный минимум книги", FIXED_SETTINGS.exactCompetitorLow ? "спрашиваем" : "не спрашиваем"],
     ["Потолок быстрой покупки", amount(FIXED_SETTINGS.quickBuyMaxCents)],
   ];
 

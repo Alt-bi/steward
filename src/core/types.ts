@@ -18,6 +18,15 @@ export interface WalletInfo {
 export interface PageContext {
   sessionid: string | null;
   steamid: string | null;
+  /**
+   * `g_rgProfileData.steamid` — whose profile this page is, said by the page.
+   *
+   * Different from `steamid`, which is whoever is logged in. On a stranger's
+   * `/id/vanity/inventory` the two differ, and only this one can tell us: the
+   * URL carries a vanity name we cannot resolve, and the viewer global happily
+   * answers with our own id for someone else's backpack.
+   */
+  profileSteamid: string | null;
   wallet: WalletInfo | null;
   language: string;
   country: string | null;

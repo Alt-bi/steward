@@ -8,6 +8,7 @@ await esbuild.build({
   entryPoints: [
     { in: "tools/probe-market.ts", out: "market" },
     { in: "tools/probe-book.ts", out: "book" },
+    { in: "tools/probe-history.ts", out: "history" },
   ],
   outdir: ".probe",
   bundle: true,
@@ -17,4 +18,7 @@ await esbuild.build({
   logLevel: "info",
   define: { __DEV__: "false" },
 });
-console.log("[probe] .probe/market.js (что видит на странице) и .probe/book.js (какой эндпоинт отвечает)");
+console.log(
+  "[probe] .probe/market.js (что видит на странице), .probe/book.js (какой эндпоинт отвечает)," +
+    " .probe/history.js (как размечена история продаж)"
+);

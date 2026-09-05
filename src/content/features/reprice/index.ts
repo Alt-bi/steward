@@ -12,6 +12,15 @@ import {
   fetchOurLotsForItem,
   listingsOnPage,
 } from "../../../steam/mylistings";
+import {
+  clearUndo,
+  loadUndo,
+  planRestore,
+  recordFrom,
+  restoreCoverage,
+  saveUndo,
+  type UndoRecord,
+} from "./undo";
 import { loadInventory, pickReturnedAsset } from "../../../steam/inventory";
 import { allowSteamTraffic, sleep, SteamError, type WaitReason } from "../../../steam/net";
 import { currencyId, feeConfig, sessionId, steamId, waitForPage } from "../../../steam/page-context";
@@ -103,6 +112,8 @@ interface State {
   /** Listings the user unticked. Everything scanned starts ticked. */
   dropped: Picks;
   filters: ListingFilters;
+  /** What the last run moved, and what it asked before it did. Null when nothing to undo. */
+  undo: UndoRecord | null;
 }
 
 function money(cents: Cents | null | undefined): string {
@@ -231,12 +242,23 @@ function commonFailure(plans: RepricePlan[]): string | null {
 }
 
 async function mount(ctx: FeatureContext): Promise<void> {
-  const section = ctx.panel.addSection("reprice", "Репрайс");
+  /**
+   * «Мои лоты», not «Репрайс».
+   *
+   * The label had never been read by anyone: no page mounted two features, so
+   * the tab bar the shell has always drawn was hidden on every one of them.
+   * «Продажи» arriving on /market is the first time these words appear on
+   * screen, and a jargon word for the tool sitting next to a plain word for
+   * what it is about reads as two unrelated panels. The id stays `reprice` —
+   * that one is addressed by code, not by people.
+   */
+  const section = ctx.panel.addSection("reprice", "Мои лоты");
 
   const state: State = {
     busy: false,
     abort: false,
     settings: ctx.settings,
+    undo: null,
     listings: [],
     groups: new Map(),
     ourIds: new Set(),
@@ -339,8 +361,25 @@ async function mount(ctx: FeatureContext): Promise<void> {
   cancelBtn.disabled = true;
   const stopBtn = el("button", "stw-btn", "Стоп");
   stopBtn.type = "button";
-  stopBtn.disabled = true;
-  actionsRest.append(applyBtn, cancelBtn, stopBtn);
+  /**
+   * Hidden, not disabled. A greyed «Стоп» sits in the row from the first paint
+   * advertising a thing that cannot be done, and it costs the buttons beside it
+   * a share of the width to say it.
+   */
+  stopBtn.hidden = true;
+  actionsRest.append(applyBtn, stopBtn);
+
+  /**
+   * «Снять» gets its own row, and the row is the distance.
+   *
+   * It stood shoulder to shoulder with «Переставить», the same size, separated
+   * only by colour: two irreversible mass actions one mouse-width apart, where
+   * the miss costs forty lots. They are also aimed differently — «Переставить»
+   * moves every ticked lot, shown or not, while «Снять» takes only what the
+   * filter has on screen — so they were never one row's worth of the same idea.
+   */
+  const cancelRow = el("div", "stw-actions stw-actions-aside");
+  cancelRow.append(cancelBtn);
 
   /** Only appears when a run stopped with items left, so it never adds noise. */
   const resumeRow = el("div", "stw-actions stw-resume");
@@ -349,8 +388,89 @@ async function mount(ctx: FeatureContext): Promise<void> {
   resumeRow.appendChild(resumeBtn);
   resumeRow.hidden = true;
 
+  /**
+   * The way back from the one button that has never had one.
+   *
+   * Shown only while there is a run to undo, because an «Вернуть как было» with
+   * nothing behind it is a button that does nothing and a promise that is not
+   * kept. It survives a reload — the batch it describes is half an hour of
+   * Steam Guard prompts, and «close the tab» must not be how it is lost.
+   */
+  const undoRow = el("div", "stw-actions stw-resume");
+  const undoBtn = el("button", "stw-btn", "Вернуть как было");
+  undoBtn.type = "button";
+  undoBtn.title = "Поставить лотам цены, которые были до последней перестановки";
+  undoRow.appendChild(undoBtn);
+  undoRow.hidden = true;
+
   const rows = el("div", "stw-rows");
-  section.body.append(stats, filterRow, shownLine, actions, actionsRest, resumeRow, rows);
+  section.body.append(
+    stats,
+    filterRow,
+    shownLine,
+    actions,
+    actionsRest,
+    cancelRow,
+    resumeRow,
+    undoRow,
+    rows
+  );
+
+  function renderUndo(): void {
+    const lots = state.undo?.lots.length ?? 0;
+    undoRow.hidden = lots === 0;
+    undoBtn.textContent = lots ? `Вернуть как было (${lots})` : "Вернуть как было";
+  }
+
+  /**
+   * Puts the remembered prices back on the lots the page is holding now.
+   *
+   * It re-reads the rows rather than trusting the last scan: the run it undoes
+   * cancelled and re-listed every one of them, so the ids from before are spent.
+   * Whatever it cannot find — still waiting on Steam Guard, or sitting on
+   * another page of the table — is counted out loud instead of silently
+   * restoring most of a batch.
+   */
+  async function restore(): Promise<void> {
+    if (state.busy) return;
+    const record = state.undo ?? (await loadUndo());
+    if (!record) {
+      status("Возвращать нечего", "warn");
+      renderUndo();
+      return;
+    }
+
+    const listings = listingsOnPage();
+    const todo = planRestore(record, listings, feeConfig());
+    const cover = restoreCoverage(record, todo);
+
+    if (!todo.length) {
+      status(
+        "Ни один из тех лотов сейчас на странице не найден",
+        "warn",
+        `Помню ${cover.remembered}. Перелистни «Мои лоты» на страницу, где они лежат, ` +
+          "и нажми ещё раз. Лоты, которые ещё ждут Steam Guard, на витрине пока не стоят."
+      );
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Вернуть прежние цены ${todo.length} лоту(ам)?\n\n` +
+        `Это снова снятие и выставление — примерно ${humanMinutes(
+          runTimeMs(todo.length, state.settings.delayMs)
+        )} работы, и Steam Guard спросит по каждому.\n` +
+        (cover.missing
+          ? `Ещё ${cover.missing} из запомненных на этой странице нет — их не трогаю.\n`
+          : "")
+    );
+    if (!confirmed) return;
+
+    await runMoves(todo, "Возвращаю");
+    /** One undo, and it is spent: the prices on screen are no longer the ones it described. */
+    state.undo = null;
+    await clearUndo();
+    renderUndo();
+  }
 
   /**
    * The pause is an annotation on whatever we are doing, not a replacement for it.
@@ -691,7 +811,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     state.busy = busy;
     scanBtn.disabled = busy;
     resumeBtn.disabled = busy;
-    stopBtn.disabled = !busy;
+    stopBtn.hidden = !busy;
     renderStats();
   }
 
@@ -1280,6 +1400,26 @@ async function mount(ctx: FeatureContext): Promise<void> {
     );
     if (!confirmed) return;
 
+    await runMoves(todo, "Переставляю");
+    /**
+     * Written after the run, from the plans themselves: `ourBuyer` is what each
+     * lot asked before it was touched, so the way home costs no bookkeeping
+     * during the run and holds only the lots that actually moved.
+     */
+    state.undo = recordFrom(todo);
+    await saveUndo(state.undo);
+    renderUndo();
+  }
+
+  /**
+   * Remove, wait, list again — once per lot, paced.
+   *
+   * Two callers now aim it at different prices: «Переставить» at the market,
+   * «Вернуть как было» at the prices the last run overwrote. The loop does not
+   * care which, and that is the point — a restore that went through a second
+   * implementation would be a second set of the bugs this one has already had.
+   */
+  async function runMoves(todo: RepricePlan[], verb: string): Promise<void> {
     state.abort = false;
     setBusy(true);
     state.settings = await loadSettings();
@@ -1352,7 +1492,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     for (let i = 0; i < todo.length; i++) {
       if (state.abort) break;
       const plan = todo[i]!;
-      status(`Переставляю ${i + 1}/${todo.length}: ${plan.name}`, "work");
+      status(`${verb} ${i + 1}/${todo.length}: ${plan.name}`, "work");
 
       /** Which part of the write we are in: the relist failing is not the same event. */
       let stage: WriteStage = "before";
@@ -1376,7 +1516,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
         const result = await sellItemWhenReady(order, pacing, {
           onRetry: (n, why) =>
             status(
-              `Переставляю ${i + 1}/${todo.length}: ${plan.name} — ` +
+              `${verb} ${i + 1}/${todo.length}: ${plan.name} — ` +
                 (why === "shrug"
                   ? `Steam отказал и не сказал почему, жду и пробую снова (${n})`
                   : `предмет ещё возвращается в инвентарь, пробую снова (${n})`),
@@ -1528,6 +1668,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   scanBtn.addEventListener("click", () => void scan());
   resumeBtn.addEventListener("click", () => void resume());
   applyBtn.addEventListener("click", () => void apply());
+  undoBtn.addEventListener("click", () => void restore());
   stopBtn.addEventListener("click", () => {
     state.abort = true;
     status("Останавливаю…", "warn");
@@ -1542,16 +1683,19 @@ async function mount(ctx: FeatureContext): Promise<void> {
     status("Останавливаю…", "warn");
   });
 
+  state.undo = await loadUndo();
+
   status(
     "Нажми «Сканировать лоты» — читаю лоты этой страницы и сравниваю с самым дешёвым чужим лотом."
   );
+  renderUndo();
   renderRows();
   renderStats();
 }
 
 register({
   id: "reprice",
-  title: "Репрайс",
+  title: "Мои лоты",
   /** Everywhere on the market except a single item page, which has its own tab. */
   matches: (url) =>
     url.pathname.startsWith("/market") && !/\/market\/listings\/\d+\//.test(url.pathname),

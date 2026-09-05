@@ -22,6 +22,7 @@ export const BRIDGE_TO_PAGE = "steward-ext";
 const ctx: PageContext = {
   sessionid: null,
   steamid: null,
+  profileSteamid: null,
   wallet: null,
   language: "english",
   country: null,
@@ -45,6 +46,8 @@ window.addEventListener("message", (event: MessageEvent) => {
 
   if (data.sessionid) ctx.sessionid = data.sessionid;
   if (data.steamid) ctx.steamid = data.steamid;
+  /** Replaced wholesale: navigating to another profile must not keep the last owner. */
+  if ("profileSteamid" in data) ctx.profileSteamid = data.profileSteamid ?? null;
   if (data.wallet) {
     ctx.wallet = data.wallet;
     fees = feesFromWallet(data.wallet);
@@ -97,6 +100,11 @@ export function sessionId(): string {
 
 export function steamId(): string | null {
   return ctx.steamid;
+}
+
+/** Whose profile page this is, when the page said so. */
+export function profileSteamId(): string | null {
+  return ctx.profileSteamid;
 }
 
 /**

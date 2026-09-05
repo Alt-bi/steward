@@ -7,6 +7,7 @@ import { resetEnv } from "./support/env";
 import { byTag, createElement, installDom, walk, type DomHandle, type FakeElement } from "./support/dom";
 
 import "../src/content/features/reprice";
+import "../src/content/features/sales";
 import "../src/content/features/inventory";
 import "../src/content/features/offers";
 import "../src/content/features/trade";
@@ -31,6 +32,7 @@ import { DEFAULT_SETTINGS } from "../src/core/settings";
 /** The pages each feature claims, in the form the content script sees them. */
 const PAGES: Record<string, string> = {
   reprice: "https://steamcommunity.com/market/",
+  sales: "https://steamcommunity.com/market/",
   inventory: "https://steamcommunity.com/id/user/inventory/",
   offers: "https://steamcommunity.com/id/user/tradeoffers/",
   trade: "https://steamcommunity.com/tradeoffer/new/?partner=1",
@@ -97,10 +99,16 @@ describe("every feature mounts on the page it claims", () => {
     }
   });
 
+  /**
+   * Two tabs here, and it is the first page that has ever had two. The shell
+   * has drawn a tab bar since the beginning and never shown one, because no
+   * URL matched more than a single feature — «Мои лоты» and «Продажи» are the
+   * pair that finally makes the bar appear.
+   */
   it("puts exactly the market tabs on the market front page", () => {
     const url = new URL("https://steamcommunity.com/market/");
     const ids = activeFeatures(url, DEFAULT_SETTINGS).map((f) => f.id);
-    assert.deepEqual(ids, ["reprice"]);
+    assert.deepEqual(ids.slice().sort(), ["reprice", "sales"]);
   });
 
   it("leaves the item page to the listing tab alone", () => {

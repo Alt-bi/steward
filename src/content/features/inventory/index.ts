@@ -1,23 +1,25 @@
 import { formatCents } from "../../../core/money";
+import { describeStrategy } from "../../../core/sell";
 import { humanMinutes } from "../../../core/duration";
 import { loadSettings, type Settings } from "../../../core/settings";
 import type { Cents, ItemKeyed } from "../../../core/types";
 import { needsConfirmation, sellItemWhenReady } from "../../../steam/actions";
 import {
-  appidFromHash,
+  activeTargets,
   contextsFromPage,
   groupInventory,
   groupTilesByContext,
+  inventoriesOnPage,
   inventoryValue,
   itemsFromTiles,
   itemsFromVisible,
   loadInventory,
   marketableGroups,
   mergeItemsByAsset,
+  ownerFromPage,
   ownerFromUrl,
+  type InventoryOwner,
   pickVisibleItems,
-  targetFromHash,
-  type InventoryChoice,
   type InventoryGroup,
   type InventoryItem,
   type TileRef,
@@ -29,6 +31,7 @@ import {
   currencyId,
   feeConfig,
   refreshPage,
+  profileSteamId,
   requestPageInfo,
   sessionId,
   steamId,
@@ -95,6 +98,14 @@ interface State {
   /** Flat item list, kept for painting badges onto Steam tiles. */
   items: InventoryItem[];
   /**
+   * Whose backpack is on screen. Null until the page has been read once.
+   *
+   * The tab mounts on any `/inventory`, including a friend's, and every write
+   * it offers is only meaningful on our own — so this is what the sell controls
+   * hang off, not a cosmetic label.
+   */
+  owner: InventoryOwner | null;
+  /**
    * Wear per assetid, cached for the life of the page — an asset never changes
    * its float, so a re-scan is free. Only the owner's own page can have it.
    */
@@ -148,7 +159,42 @@ async function mount(ctx: FeatureContext): Promise<void> {
     sort: "value",
     items: [],
     wears: new Map(),
+    owner: null,
   };
+
+  /** Who the page says it belongs to, asked again every time we look. */
+  function readOwner(): InventoryOwner | null {
+    return ownerFromUrl(location.pathname, steamId() ?? "", statedSteamId());
+  }
+
+  /**
+   * The owner, as stated by the page rather than guessed from the URL.
+   *
+   * Two statements, either of which is enough. `g_rgProfileData` is the profile
+   * header; the drawn `#inventory_{steamid}_{appid}_{contextid}` containers are
+   * the grid itself. They agree when both exist, and the second one is here
+   * because the first is a global that a page can finish loading without —
+   * and when it does, a vanity URL leaves us guessing and the write controls
+   * vanish from the owner's own backpack.
+   */
+  function statedSteamId(): string | null {
+    return profileSteamId() ?? ownerFromPage(inventoriesOnPage(document));
+  }
+
+  /**
+   * The same question, but only answered when the answer is stated rather than
+   * inferred — which is what makes it safe to ask before a scan.
+   *
+   * A guess this early is worse than silence in both directions: without a
+   * viewer id every page looks like somebody else's, and on a bare vanity URL
+   * a warning over an empty panel accuses our own backpack of being a
+   * stranger's. Null means «not yet», and the controls stay ordinary.
+   */
+  function statedOwner(): InventoryOwner | null {
+    if (!steamId()) return null;
+    const owner = readOwner();
+    return owner && !owner.assumed ? owner : null;
+  }
 
   /**
    * The counters, and the one of them that is also a filter.
@@ -219,6 +265,13 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
   const hint = el("div", "stw-hint", "Ctrl+клик по плитке — снять или вернуть одну копию");
 
+  /**
+   * Said out loud only when it is not our backpack, because that is the only
+   * time it explains a missing button.
+   */
+  const ownerNote = el("div", "stw-hint", "");
+  ownerNote.hidden = true;
+
   /** Scanning is where every pass starts, so it gets the width. */
   const actions = el("div", "stw-actions stw-actions-main");
   const scanBtn = el("button", "stw-btn stw-btn-primary", "Оценить страницу");
@@ -226,13 +279,43 @@ async function mount(ctx: FeatureContext): Promise<void> {
   actions.append(scanBtn);
 
   const actionsRest = el("div", "stw-actions stw-actions-rest");
-  const sellBtn = el("button", "stw-btn stw-btn-go", "Выставить");
-  sellBtn.type = "button";
-  sellBtn.disabled = true;
+  /**
+   * The whole backpack, not the screenful of it.
+   *
+   * `loadInventory` has been able to do this since the beginning and was only
+   * ever used to fill in tiles Steam had drawn without names. «Сколько стоит
+   * весь мой инвентарь» is the first question anyone asks such a tab, and the
+   * machinery for it was already written and switched off.
+   */
+  const allBtn = el("button", "stw-btn", "Оценить всё");
+  allBtn.type = "button";
+  allBtn.title = "Прочитать весь инвентарь по выбранной игре, а не только эту страницу";
+  /**
+   * Hidden, not disabled. A greyed «Стоп» sits in the row from the first paint
+   * advertising a thing that cannot be done, and it costs the two buttons
+   * beside it a third of their width to say it.
+   */
   const stopBtn = el("button", "stw-btn", "Стоп");
   stopBtn.type = "button";
-  stopBtn.disabled = true;
-  actionsRest.append(sellBtn, stopBtn);
+  stopBtn.hidden = true;
+  actionsRest.append(allBtn, stopBtn);
+
+  /**
+   * The one button here that spends something, on a line of its own.
+   *
+   * It used to be the third of three in the row above, labelled «Выставить» and
+   * greyed out until a scan finished — so on a freshly opened tab it read as a
+   * disabled footnote to «Оценить всё», and after a scan it was still the
+   * narrowest thing on the panel. It also never said what price it would ask,
+   * which is the only question a seller has before pressing it. Now it appears
+   * when there is something to list, takes the width, and names the price rule
+   * it is about to follow.
+   */
+  const sellRow = el("div", "stw-actions stw-actions-sell");
+  const sellBtn = el("button", "stw-btn stw-btn-go", "Выставить");
+  sellBtn.type = "button";
+  sellRow.appendChild(sellBtn);
+  sellRow.hidden = true;
 
   const resumeRow = el("div", "stw-actions stw-resume");
   const resumeBtn = el("button", "stw-btn stw-btn-primary", "Догрузить цены");
@@ -241,7 +324,39 @@ async function mount(ctx: FeatureContext): Promise<void> {
   resumeRow.hidden = true;
 
   const rows = el("div", "stw-rows");
-  section.body.append(stats, filterRow, hint, actions, actionsRest, resumeRow, rows);
+  section.body.append(
+    stats,
+    filterRow,
+    hint,
+    ownerNote,
+    actions,
+    actionsRest,
+    sellRow,
+    resumeRow,
+    rows
+  );
+
+  /**
+   * Everything that writes disappears on a backpack that is not ours.
+   *
+   * Hidden rather than disabled: a greyed «Выставить» invites the press and
+   * then blames Steam for the refusal, and the same panel on our own page has
+   * a greyed «Выставить» that only means «nothing ticked yet». One appearance
+   * cannot honestly carry both.
+   */
+  function renderOwner(): void {
+    const owner = state.owner;
+    const mine = owner?.mine ?? true;
+    hint.hidden = !mine;
+    ownerNote.hidden = mine;
+    if (!mine) {
+      ownerNote.textContent = owner?.assumed
+        ? "Не могу подтвердить, что инвентарь твой — обнови вкладку. Считаю цены, но выставлять отсюда не дам."
+        : "Это чужой инвентарь: считаю, сколько он стоит, но выставлять из него нечего.";
+    }
+    renderRows();
+    renderStats();
+  }
 
   let phase = "";
   let phaseKind: StatusKind = "";
@@ -321,9 +436,17 @@ async function mount(ctx: FeatureContext): Promise<void> {
     statNodes.value!.textContent = money(totals.value);
     statNodes.sell!.textContent = String(pendingSells().length);
 
+    /**
+     * The label carries the price rule, because «Выставить 12» answers how many
+     * and not at what — and the price is decided by a setting that has no
+     * control any more, so nothing else on screen could have said it.
+     */
     const todo = pendingSells().length;
-    sellBtn.textContent = todo ? `Выставить ${todo}` : "Выставить";
-    sellBtn.disabled = state.busy || todo === 0;
+    sellBtn.textContent = todo
+      ? `Выставить ${todo} — ${describeStrategy(state.settings.sell)}`
+      : "Выставить";
+    sellBtn.disabled = state.busy;
+    sellRow.hidden = !(state.owner?.mine ?? true) || todo === 0;
 
     const only = onlySellable();
     statButtons.sell!.setAttribute("aria-pressed", String(only));
@@ -456,6 +579,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     /** One stack, one click, without disturbing the rest of the selection. */
     const quick = el("button", "stw-btn stw-btn-thin", "продать");
     quick.type = "button";
+    quick.hidden = !(state.owner?.mine ?? true);
     quick.disabled = state.busy || !sellable;
     quick.title = "Выставить только этот предмет";
     quick.addEventListener("click", () => void quickSell(group));
@@ -492,9 +616,10 @@ async function mount(ctx: FeatureContext): Promise<void> {
   function setBusy(busy: boolean): void {
     state.busy = busy;
     scanBtn.disabled = busy;
+    allBtn.disabled = busy;
     resumeBtn.disabled = busy;
-    stopBtn.disabled = !busy;
-    sellBtn.disabled = busy || pendingSells().length === 0;
+    stopBtn.hidden = !busy;
+    renderStats();
   }
 
   let stopWatching: (() => void) | null = null;
@@ -583,7 +708,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
     }
   }
 
-  async function priceGroups(toFetch: ItemKeyed[]): Promise<void> {
+  async function priceGroups(toFetch: ItemKeyed[], scope: "page" | "all" = "page"): Promise<void> {
     const result = await fetchMarketLows(toFetch, {
       ...pacing,
       concurrency: state.settings.scanConcurrency,
@@ -617,10 +742,12 @@ async function mount(ctx: FeatureContext): Promise<void> {
       return;
     }
     status(
-      `На экране на ${money(totals.total)}` +
+      `${scope === "all" ? "Инвентарь на" : "На экране на"} ${money(totals.total)}` +
         (totals.unpriced ? ` · без цены ${totals.unpriced}` : ""),
       "ok",
-      `Перелистни сетку и оцени снова, чтобы взять следующие предметы. ${spent}`
+      (scope === "all"
+        ? "Это весь инвентарь по выбранной игре. "
+        : "Перелистни сетку и оцени снова, чтобы взять следующие предметы. ") + spent
     );
   }
 
@@ -655,7 +782,9 @@ async function mount(ctx: FeatureContext): Promise<void> {
       return;
     }
 
-    const owner = ownerFromUrl(location.pathname, steamId() ?? "");
+    const owner = readOwner();
+    state.owner = owner;
+    renderOwner();
 
     try {
       await refreshPage();
@@ -719,14 +848,163 @@ async function mount(ctx: FeatureContext): Promise<void> {
   }
 
   /**
+   * How long a price pass over N distinct items can take, at the outside.
+   *
+   * The governor allows twenty requests a minute across the whole extension and
+   * the search endpoint answers for a whole family of skins at once, so this is
+   * an upper bound rather than a forecast — which is the right way round for a
+   * number a person is about to agree to.
+   */
+  function priceRunMs(groups: number): number {
+    return Math.ceil(groups / 20) * 60_000;
+  }
+
+  /**
+   * The whole backpack for the game Steam has selected.
+   *
+   * Deliberately a second button rather than a bigger first one: reading the
+   * inventory is cheap and pricing it is not, so the expensive half is asked
+   * for out loud, counted, and confirmed — the same ritual the sales history
+   * and the price history already use.
+   */
+  async function scanAll(): Promise<void> {
+    if (state.busy) return;
+    state.abort = false;
+    setBusy(true);
+    status("Читаю весь инвентарь…", "work");
+
+    const quiet = await allowSteamTraffic();
+    if (quiet) {
+      status(quiet, "warn");
+      setBusy(false);
+      return;
+    }
+
+    state.settings = await loadSettings();
+    await waitForPage();
+
+    const owner = readOwner();
+    state.owner = owner;
+    renderOwner();
+
+    if (!owner) {
+      status("Не понял, чей это инвентарь", "err", "Обнови вкладку и попробуй снова.");
+      setBusy(false);
+      return;
+    }
+
+    /**
+     * Which game to read, asked of the page rather than of the URL.
+     *
+     * This used to be `targetFromHash` alone, which meant «Оценить всё» refused
+     * a freshly opened inventory — Steam only writes `#730_2` once a game has
+     * been clicked — and told the owner to choose the game that was already on
+     * the screen behind the panel.
+     */
+    await refreshPage();
+    const targets = activeTargets({
+      hash: location.hash,
+      steamid: owner.steamid,
+      drawn: inventoriesOnPage(document),
+      tiles: visibleTileRefs(document),
+      contexts: contextsFromPage(appContexts()),
+    });
+    if (!targets.length) {
+      status(
+        "Не вижу, инвентарь какой игры открыт",
+        "warn",
+        "Читаю целиком по одной игре — Steam так и отдаёт инвентарь. Дождись, пока " +
+          "сетка нарисуется, и нажми снова."
+      );
+      setBusy(false);
+      return;
+    }
+
+    try {
+      /**
+       * One game can hold more than one inventory — CS2 draws contexts 2 and 16
+       * on the same page — so «весь инвентарь по этой игре» is a loop, and the
+       * progress line counts across all of them rather than restarting.
+       */
+      let items: InventoryItem[] = [];
+      let truncated = false;
+      for (const target of targets) {
+        const before = items.length;
+        try {
+          const loaded = await loadInventory(target, {
+            ...pacing,
+            onProgress: (done, total) =>
+              status(`Предметов: ${before + done} / ${before + total}`, "work"),
+          });
+          items = mergeItemsByAsset(items, loaded.items);
+          truncated = truncated || loaded.truncated;
+        } catch (err) {
+          /**
+           * One context we cannot read is not a failed run. A ban or a stop
+           * still is — those are about the account, not about this shelf.
+           */
+          if (err instanceof SteamError && (err.kind === "aborted" || err.kind === "blocked")) throw err;
+        }
+      }
+
+      state.items = items;
+      state.groups = groupInventory(items);
+      const { toPrice, skipped } = marketableGroups(state.groups);
+
+      if (!toPrice.length) {
+        status(
+          `Нашёл ${items.length}, оценивать нечего`,
+          "warn",
+          skipped ? `Без рынка ${skipped}.` : "Steam не принимает на площадку ни один из них."
+        );
+        setBusy(false);
+        renderRows();
+        renderStats();
+        return;
+      }
+
+      /**
+       * The count is said before the cost is paid. A user told «это 480
+       * запросов, минут двадцать пять» can decide; one watching a progress bar
+       * can only wait and wonder whether it hung.
+       */
+      const confirmed = window.confirm(
+        `В инвентаре ${items.length} предметов, из них разных ${toPrice.length}.\n\n` +
+          `Цены на всё — это до ${humanMinutes(priceRunMs(toPrice.length))} работы, ` +
+          "вкладку лучше не закрывать.\n" +
+          (truncated ? "Steam отдал не весь инвентарь — он слишком большой.\n" : "") +
+          (skipped ? `Ещё ${skipped} без рынка — их не спрашиваю.\n` : "")
+      );
+      if (!confirmed) {
+        status(
+          `Прочитал ${items.length}, разных ${state.groups.size} — цены не запрашивал`,
+          "",
+          "Нажми «Оценить всё» ещё раз, когда будешь готов подождать."
+        );
+        setBusy(false);
+        renderRows();
+        renderStats();
+        return;
+      }
+
+      await priceGroups(toPrice, "all");
+      await loadWears(owner);
+    } catch (err) {
+      if (err instanceof SteamError && err.kind === "aborted") status("Остановлено", "warn");
+      else status(`Инвентарь: ${describeError(err)}`, "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
    * Wear for CS copies on screen. One request per context covers every asset
    * Steam owns in it, so this is decoration that costs almost nothing — and it
    * is only asked on a page that is provably the owner's own, because a float
    * is only ever worth reading about a copy that could be listed.
    */
-  async function loadWears(owner: { steamid: string; assumed: boolean } | null): Promise<void> {
-    const viewer = steamId();
-    if (!owner || !viewer || owner.steamid !== viewer) return;
+  async function loadWears(owner: InventoryOwner | null): Promise<void> {
+    if (!owner?.mine) return;
     const fresh = state.items.filter(
       (item) => item.appid === WEAR_APPID && !state.wears.has(item.assetid)
     );
@@ -745,7 +1023,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
       if (!first) continue;
       try {
         const found = await fetchWear(
-          { steamid: viewer, appid: first.appid, contextid: first.contextid },
+          { steamid: owner.steamid, appid: first.appid, contextid: first.contextid },
           first.assetid,
           pacing
         );
@@ -780,8 +1058,29 @@ async function mount(ctx: FeatureContext): Promise<void> {
     }
   }
 
+  /**
+   * The last gate before anything is sent, restated where the send is.
+   *
+   * The buttons are already hidden on a foreign page, but hiding is a drawing
+   * decision and `sellitem` spends a real session against real asset ids. The
+   * rule belongs next to the call as well as next to the pixel.
+   */
+  function refuseForeign(): boolean {
+    const owner = state.owner ?? readOwner();
+    if (owner?.mine) return true;
+    status(
+      "Выставлять можно только из своего инвентаря",
+      "warn",
+      owner?.assumed
+        ? "Страница не назвала владельца — обнови вкладку, чтобы Steam сообщил его снова."
+        : "Открыт чужой инвентарь: цены посчитаю, а лоты ставятся только из своего."
+    );
+    return false;
+  }
+
   async function sell(): Promise<void> {
     if (state.busy) return;
+    if (!refuseForeign()) return;
     const todo = pendingSells();
     if (!todo.length) return;
 
@@ -817,6 +1116,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
    */
   async function quickSell(group: InventoryGroup): Promise<void> {
     if (state.busy) return;
+    if (!refuseForeign()) return;
     if (state.lows[group.key] == null) return;
 
     state.settings = await loadSettings();
@@ -937,6 +1237,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   });
 
   scanBtn.addEventListener("click", () => void scan());
+  allBtn.addEventListener("click", () => void scanAll());
   resumeBtn.addEventListener("click", () => void resume());
   sellBtn.addEventListener("click", () => void sell());
   stopBtn.addEventListener("click", () => {
@@ -946,9 +1247,14 @@ async function mount(ctx: FeatureContext): Promise<void> {
 
   /** The wallet and the session still arrive with the page, so ask for them. */
   requestPageInfo();
+  /**
+   * A foreign backpack that says so outright is known before anything is
+   * scanned, so the write controls never appear on it at all.
+   */
+  state.owner = statedOwner();
 
   status("Открой страницу инвентаря и нажми «Оценить страницу»");
-  renderRows();
+  renderOwner();
   renderStats();
 }
 

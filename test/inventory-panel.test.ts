@@ -142,7 +142,38 @@ describe("the inventory tab, after the controls were thinned out", () => {
     const rest = walk(body).find((n) => n.className === "stw-actions stw-actions-rest");
     assert.ok(main && rest, "ряды кнопок должны быть разделены");
     assert.deepEqual(byTag(main!, "button").map((b) => b.textContent), ["Оценить страницу"]);
-    assert.deepEqual(byTag(rest!, "button").map((b) => b.textContent), ["Выставить", "Стоп"]);
+    assert.deepEqual(byTag(rest!, "button").map((b) => b.textContent), ["Оценить всё", "Стоп"]);
+    /**
+     * «Стоп» is in the row and out of sight until there is a run to stop. A
+     * disabled button still takes a third of the row to advertise something
+     * that cannot be done.
+     */
+    const live = byTag(rest!, "button").filter((b) => !b.hidden);
+    assert.deepEqual(live.map((b) => b.textContent), ["Оценить всё"]);
+  });
+
+  /**
+   * The write is not a third button in a row of three.
+   *
+   * «Выставить» spent the whole life of the tab greyed out beside two read-only
+   * buttons, saying neither how many nor at what price — and on a fresh tab a
+   * disabled button is indistinguishable from a missing one. It now waits out
+   * of the row entirely and arrives with the width when there is something to
+   * list.
+   */
+  it("keeps the selling button out of the way until there is something to sell", async () => {
+    const { body, panel } = fakePanel();
+    await inventory().mount({
+      panel,
+      settings: DEFAULT_SETTINGS,
+      url: new URL("https://steamcommunity.com/id/someone/inventory"),
+    });
+    await settle();
+
+    const sell = walk(body).find((n) => n.className === "stw-actions stw-actions-sell");
+    assert.ok(sell, "ряд для «Выставить» должен быть отдельным");
+    assert.equal(sell!.hidden, true, "до оценки выставлять нечего — ряда не видно");
+    assert.deepEqual(byTag(sell!, "button").map((b) => b.textContent), ["Выставить"]);
   });
 
   it("counts «к продаже» as a button, because pressing it is the filter", async () => {

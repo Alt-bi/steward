@@ -8,6 +8,7 @@ import { extensionAlive, showStaleNotice, watchForOrphaning } from "./ui/orphan"
 
 /** Importing a feature is what registers it. */
 import "./features/reprice";
+import "./features/sales";
 import "./features/inventory";
 import "./features/offers";
 import "./features/trade";

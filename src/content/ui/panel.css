@@ -371,6 +371,16 @@
   white-space: nowrap;
 }
 
+/* The write gets a line of its own once there is something to write. Third in a
+   row of three it read as a footnote to the button beside it, and it is the only
+   control on the tab that spends anything. */
+.stw-actions-sell .stw-btn {
+  flex: 1 1 100%;
+  padding-top: 9px;
+  padding-bottom: 9px;
+  font-size: 13px;
+}
+
 /* The follow-up rows are part of the same block: no rule, no gap of their own.
    They keep the 8px the buttons keep between each other — without it the wide
    scan button sits flush on the row beneath and reads as one mashed control. */
@@ -433,6 +443,22 @@
 
 .stw-btn-danger:hover:not(:disabled) {
   background: #8d3c3c;
+}
+
+/* A row for the action that is not what the tab is for.
+   «Снять» needed to stop sitting a mouse-width from «Переставить» — two
+   irreversible mass actions the same size, told apart by colour alone. Giving
+   it its own row fixed the proximity and broke the weighting instead: a
+   full-width red button under a full-width green one reads as the louder of
+   the two. So the row separates it and this keeps it small in the row. */
+.stw-actions-aside {
+  justify-content: flex-end;
+}
+
+.stw-actions-aside .stw-btn {
+  flex: 0 0 auto;
+  padding-left: 16px;
+  padding-right: 16px;
 }
 
 .stw-rows {
@@ -563,7 +589,8 @@
   border-left-style: dashed;
 }
 
-.stw-resume[hidden] {
+/* A row of buttons is a flex container, which outranks the UA's `[hidden]`. */
+.stw-actions[hidden] {
   display: none;
 }
 

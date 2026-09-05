@@ -10,12 +10,12 @@ Not SIH: no ads, no subscriptions, no telemetry. Every request goes to `steamcom
 
 ## What it does
 
-- **Reprice** — scans the listings Steam has already painted on this page, finds the competitor minimum, and relists one tick below. Listings that already hold the floor are left alone. Search, sorting and per-row ticking work on the scanned page for free, and the ticked rows can be taken off the market in bulk instead of repriced. Page the Steam table and scan again for the next batch.
-- **Inventory** — values the items currently visible in Steam's grid, totals them, paints prices on those tiles, and lists the selection: at the floor, under it, or with a markup. It does not walk the whole backpack. Search, filters, sorting and bulk ticking work on what is already priced, so narrowing a page of two hundred stacks costs no requests; Ctrl+click on a tile picks or drops that single copy, and a single stack can be listed on its own. The game picker comes from the page (`g_rgAppContextData`).
-- **Buy orders** — on the market home page: every standing order, how much of the wallet each is holding, and — on request — how far each one sits from the current market minimum. Orders can be cancelled in bulk.
+- **Reprice** — scans the listings Steam has already painted on this page, finds the competitor minimum, and relists one tick below. Listings that already hold the floor are left alone. Search and per-row ticking work on the scanned page for free, and pressing a counter is the filter, and the ticked rows can be taken off the market in bulk instead of repriced. Page the Steam table and scan again for the next batch. A run can be **taken back**: the price each lot asked before it moved is remembered, and «Вернуть как было» puts those prices onto the lots the page is holding now.
+- **Inventory** — values the items currently visible in Steam's grid, totals them, paints prices on those tiles, and lists the selection at the market floor — the green button names the price rule it will follow and appears only once there is something to list. «Оценить страницу» stays on what Steam has drawn; «Оценить всё» reads the entire inventory for the selected game, counts the distinct items out loud and asks before spending the requests. On somebody else's inventory it prices and totals as usual and offers nothing to press — listing needs a backpack that is ours. Search and bulk ticking work on what is already priced, so narrowing a page of two hundred stacks costs no requests, and pressing the «к продаже» counter is the filter; Ctrl+click on a tile picks or drops that single copy, and a single stack can be listed on its own. There is no game picker — the scan takes the tiles Steam has drawn, and «Оценить всё» takes the game Steam has drawn, read off the grid's own id rather than out of the URL fragment — which Steam only writes once a game has been clicked.
 - **Price levels** — anywhere a price is set, the target can be the cheapest competitor *or* what the item has actually been selling for: the volume-weighted average of the last week, month, or year. Pricing against the market walks it down a kopeck at a time; pricing against last month's average is how a listing moves **up** and waits. Available in the repricer, in the inventory's sell strategy, and shown as a ladder on the item page.
 - **Offers** — on the trade-offer list: every offer at once, what leaves and what arrives, which are held in escrow, which take items and give nothing back. On request it names the items and prices both sides, so the one offer worth opening can be found without opening thirty. It never accepts or declines anything.
 - **Trade** — on an offer page, prices both sides, shows the gap, and flags what is wrong: a lookalike swap, invisible characters, mixed alphabets in a name, unmarketable items, a lopsided value.
+- **Sales** — on the market home page, next to «Мои лоты»: what actually came of it. Reads `/market/myhistory` a hundred records at a time and totals what buyers paid, what that leaves after fees, what was spent buying, and which items brought in the most.
 - **Item** — on a listing: current lots, a sales-history chart, 30-day average and floor, a cheaper/dearer verdict, liquidity, and a one-click buy of the cheapest lot under a hard cap.
 
 ## What it will not do
@@ -25,12 +25,22 @@ Steward is a SIH *alternative*, not a SIH clone. These stay out on purpose:
 | SIH feature | Why Steward will not |
 |---|---|
 | Prices from 28 marketplaces | Needs a backend and affiliates. Steward is Steam-only. |
-| Float / paint seed / float rank | Steam does not put them in the web inventory. Getting them means a third-party inspect API or the Game Coordinator. |
+| Float **rank** ("this is the 40th lowest in the world") | Needs a database of every copy ever inspected. The float itself is here — see below. |
 | Steam Desktop Authenticator | Storing a shared secret is a ToS and account-risk problem. |
 | Auto-buy sniper | Spending money is a human decision. One-click buy with a cap, yes. A loop that buys, no. |
 | Ads, subscriptions, telemetry | The point of the project. |
 
-CS2 still gets wear from the hash name, rarity/collection from Steam `tags`, stickers and charms from item `descriptions`, and Inspect in game. Just not a float number.
+**CS2 wear is in, and it costs one request per screen.** Steam keeps the float off the
+inventory payload, but the inventory page itself calls
+`inventory/{steamid}/{appid}/{contextid}/itemdynproperties/{assetid}` — and that answers
+for *every* copy in the context regardless of which assetid sits in the path. So one
+request decorates a whole grid with Wear Rating, Paint Seed and Pattern Template
+(`src/steam/floats.ts`), where SIH queues one round-trip per item through its own
+server. Chips paint on the tile's top edge, on the owner's own page only, and a crate
+with no float is an answer rather than a failure. What stays out is float *rank*.
+
+CS2 also gets wear from the hash name, rarity/collection from Steam `tags`, stickers and
+charms from item `descriptions`, and Inspect in game.
 
 ---
 
@@ -65,7 +75,7 @@ npm run check    # typecheck + tests + build
    - the answer is recorded as **checked** (`sole` — nobody is down there with us) or **unchecked** (`ours`, `no-price`). Only the first is good news, and the panel counts them separately.
 5. Target = competitor minimum − N cents, inverted through the fee function (5% Steam + 10% publisher) by binary search.
 6. On the button: `removelisting` → pause → `sellitem`. Sales still need Steam Guard.
-7. Mass cancel is the same `removelisting` without the second half, and buy orders go through `cancelbuyorder`. Both stop at the **first** refusal from Steam rather than waiting out a pause and continuing, and both say how many they had done by then. Steam takes a cancelled listing or order off the page immediately, so nothing is re-read afterwards — the row says what happened to it.
+7. Mass cancel is the same `removelisting` without the second half. It stops at the **first** refusal from Steam rather than waiting out a pause and continuing, and says how many it had done by then. Steam takes a cancelled listing off the page immediately, so nothing is re-read afterwards — the row says what happened to it.
 
 8. The offer list draws items as pictures: a tile carries only `classinfo/{appid}/{classid}/{instanceid}`, and the name arrives when you hover. Valuing an inbox therefore needs one `economy/itemclasshover` per **distinct class** — the only place in the extension that asks Steam about something the page did not already say. A class is immutable, so answers are kept in `chrome.storage.local` forever and a second inbox is nearly free. Before a large run the panel says how many unknown items there are and roughly how long that will take, because a user who is told «this is 300 requests» can decide and a user watching a progress bar cannot.
 
@@ -129,7 +139,7 @@ Search turns itself off in two cases:
 - **nothing to batch** — N items would take N queries (emoticons, backgrounds, cards), so search is an extra round trip. Straight to `priceoverview`;
 - **it cannot find them** — if a sample of 6 groups matches under 30%, search is dropped and the rest is fetched one by one. That used to cost 700 useless requests.
 
-With the exact competitor floor on (the default), the repricer uses neither of these: it reads the cache, then goes straight to the listing book, because that is the only request that answers every time it is spent. Both sources stay in use for the inventory, the offers tab and buy orders, where the market minimum *is* the answer.
+With the exact competitor floor on (the default), the repricer uses neither of these: it reads the cache, then goes straight to the listing book, because that is the only request that answers every time it is spent. Both sources stay in use for the inventory and the offers tab, where the market minimum *is* the answer.
 
 A scan covers **this Steam page only** — typically ~10 listings or ~25 inventory tiles, not hundreds of unique hashes. Page Steam's own pager and scan again. Cached prices make a second page cheap.
 
@@ -153,6 +163,17 @@ Checks, all on pure functions:
 | Unknown prices | warn | totals are incomplete, and that is said outright |
 
 If a lookalike's price could not be checked, the level drops to warn. Accusing without a number is not allowed.
+
+### Market history
+
+`/market/myhistory/render` answers in the `/market/mylistings` envelope — `results_html` plus `assets` and `hovers` — so only the rows are new. Two things there are decided on purpose:
+
+- **Dates are never parsed.** Steam prints them short, localised and without a year (`4 сен`, `Sep 4`). Decoding that means guessing a locale and then guessing which December is last December, and revenue built on a guessed year is worse than no revenue. The strings are carried through as written, and the window is «the last N records».
+- **A row is a sale or a purchase only when somebody is on the other end of it.** The `+`/`-` cell says whether items arrived or left, which cannot tell a sale from a listing being created — both take the item away. Only a sale and a purchase link to a person. Reading the sign alone would count every lot ever posted as revenue.
+
+This is the one parser here written ahead of its measurement. `npm run probe` builds `.probe/history.js`, which prints one page of real rows with the sign, the counterparty, the verdict and the raw markup of each kind it found — run it on a live `/market` and the guesses above become facts or get corrected.
+
+The only computed figure is «на руки»: Steam states what the buyer paid and never what reached the wallet, so it is the same fee inversion the repricer aims with, at the standard publisher rate. The panel says which number was read and which was worked out.
 
 ### Price levels
 
@@ -263,13 +284,15 @@ Regressions that already happened are locked in:
 - [x] Trade-offer analysis: side totals, highlight, lookalike swap
 - [x] Quick buy on the listing page
 - [x] Price-history chart (`market/pricehistory`)
-- [x] Inventory: search, filters, sorting, bulk select, quick sell of one stack
+- [x] Inventory: search, counter-as-filter, bulk select, quick sell of one stack
 - [x] Inventory: pick single copies on Steam's own tiles (Ctrl+click)
-- [x] Own listings: search, sorting, per-row select, mass cancel
-- [x] Buy orders: what they hold, distance to the market, mass cancel
+- [x] Own listings: search, counter-as-filter, per-row select, mass cancel
 - [x] Trade offer inbox as a whole, not one offer at a time
 - [ ] CS2: stickers, charms, Steam tags (not float)
-- [ ] Badge crafting, market-history export, local inventory-value snapshots
+- [x] Market history: revenue, fees, what sold, what was bought
+- [x] Undo the last mass reprice
+- [x] Value the whole inventory, not just the drawn page
+- [ ] Badge crafting, local inventory-value snapshots
 - [ ] Auto-buy sniper — **not planned**: a purchase spends money, and each one stays a human call
 
 ## Leftovers from version 1

@@ -268,6 +268,41 @@ describe("ownerFromUrl", () => {
     const owner = ownerFromUrl("/profiles/123/inventory/", "76561198000000001");
     assert.equal(owner?.assumed, true);
   });
+
+  /**
+   * `mine` is what the sell controls hang off, so its whole job is to be false
+   * whenever the answer was not stated. The panel used to work this out as
+   * «steamid equals the viewer» over a value that *defaulted* to the viewer —
+   * an identity check against a copy of itself, true on every page.
+   */
+  it("takes the owner the page named over the one the URL implies", () => {
+    const owner = ownerFromUrl("/id/vanity/inventory/", "76561198000000001", "76561198000000001");
+    assert.equal(owner?.steamid, "76561198000000001");
+    assert.equal(owner?.assumed, false, "страница сказала — это не догадка");
+    assert.equal(owner?.mine, true);
+  });
+
+  it("knows a stranger's backpack when the page names them", () => {
+    const owner = ownerFromUrl("/id/vanity/inventory/", "76561198000000001", "76561198000000009");
+    assert.equal(owner?.steamid, "76561198000000009");
+    assert.equal(owner?.mine, false, "чужой инвентарь — писать в него нечем");
+  });
+
+  it("never calls a guess ours", () => {
+    const owner = ownerFromUrl("/id/vanity/inventory/", "76561198000000001");
+    assert.equal(owner?.assumed, true);
+    assert.equal(owner?.mine, false, "догадка не даёт права на sellitem");
+  });
+
+  it("reads a stranger straight off a profiles URL", () => {
+    const owner = ownerFromUrl("/profiles/76561198000000009/inventory/", "76561198000000001");
+    assert.equal(owner?.mine, false);
+  });
+
+  it("ignores a page id that is not a steamid at all", () => {
+    const owner = ownerFromUrl("/profiles/76561198000000009/inventory/", "76561198000000001", "0");
+    assert.equal(owner?.steamid, "76561198000000009", "мусор от страницы не отменяет URL");
+  });
 });
 
 describe("contextsFromPage", () => {

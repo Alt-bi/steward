@@ -180,7 +180,12 @@ async function mount(ctx: FeatureContext): Promise<void> {
   priceBtn.disabled = true;
   const stopBtn = el("button", "stw-btn", "Стоп");
   stopBtn.type = "button";
-  stopBtn.disabled = true;
+  /**
+   * Hidden, not disabled. A greyed «Стоп» sits in the row from the first paint
+   * advertising a thing that cannot be done, and it costs the buttons beside it
+   * a share of the width to say it.
+   */
+  stopBtn.hidden = true;
   actionsRest.append(priceBtn, stopBtn);
 
   const rows = el("div", "stw-rows");
@@ -284,7 +289,7 @@ async function mount(ctx: FeatureContext): Promise<void> {
   function setBusy(busy: boolean): void {
     state.busy = busy;
     scanBtn.disabled = busy;
-    stopBtn.disabled = !busy;
+    stopBtn.hidden = !busy;
     renderStats();
   }
 

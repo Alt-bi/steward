@@ -6,6 +6,7 @@ import { DEFAULT_SETTINGS } from "../src/core/settings";
 
 /** Importing the features is what registers them. */
 import "../src/content/features/reprice";
+import "../src/content/features/sales";
 import "../src/content/features/inventory";
 import "../src/content/features/offers";
 import "../src/content/features/trade";
@@ -21,18 +22,23 @@ describe("feature routing", () => {
   it("registers every feature exactly once", () => {
     const ids = allFeatures().map((f) => f.id);
     assert.deepEqual([...new Set(ids)].sort(), ids.slice().sort(), "no duplicate registrations");
-    assert.deepEqual(ids.slice().sort(), ["cards", "farm", "inventory", "listing", "offers", "reprice", "trade"]);
+    assert.deepEqual(ids.slice().sort(), [
+      "cards",
+      "farm",
+      "inventory",
+      "listing",
+      "offers",
+      "reprice",
+      "sales",
+      "trade",
+    ]);
   });
 
-  it("puts the factory alone on the market front page", () => {
+  it("puts both market tabs on the market front page", () => {
     /** The buy-order tab died with the old market: it read a DOM table Steam
-     * no longer draws anywhere. One honest tab, everywhere on /market. */
-    assert.deepEqual(idsFor("https://steamcommunity.com/market/"), ["reprice"]);
-  });
-
-  it("keeps the buy-order tab off the market subpages that have no orders", () => {
-    assert.deepEqual(idsFor("https://steamcommunity.com/market/search"), ["reprice"]);
-    assert.deepEqual(idsFor("https://steamcommunity.com/market/mylistings"), ["reprice"]);
+     * no longer draws anywhere. What lives here now is «Мои лоты» and the
+     * ledger that says what came of them. */
+    assert.deepEqual(idsFor("https://steamcommunity.com/market/").sort(), ["reprice", "sales"]);
   });
 
   it("hands a single item page to the listing tab alone", () => {
@@ -43,9 +49,9 @@ describe("feature routing", () => {
     );
   });
 
-  it("keeps reprice on other market subpages", () => {
-    assert.deepEqual(idsFor("https://steamcommunity.com/market/mylistings"), ["reprice"]);
-    assert.deepEqual(idsFor("https://steamcommunity.com/market/search"), ["reprice"]);
+  it("keeps both market tabs on other market subpages", () => {
+    assert.deepEqual(idsFor("https://steamcommunity.com/market/mylistings").sort(), ["reprice", "sales"]);
+    assert.deepEqual(idsFor("https://steamcommunity.com/market/search").sort(), ["reprice", "sales"]);
   });
 
   it("puts inventory on both profile URL shapes", () => {
@@ -65,7 +71,7 @@ describe("feature routing", () => {
   it("honours a feature turned off in settings, and only that one", () => {
     const off = { ...DEFAULT_SETTINGS, features: { reprice: false } };
     const ids = activeFeatures(new URL("https://steamcommunity.com/market/"), off).map((f) => f.id);
-    assert.deepEqual(ids, []);
+    assert.deepEqual(ids, ["sales"], "выключили одну — соседка по странице осталась");
   });
 });
 describe("cards routing", () => {

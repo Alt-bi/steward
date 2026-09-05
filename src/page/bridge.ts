@@ -22,6 +22,8 @@ declare global {
   interface Window {
     g_sessionID?: string;
     g_steamID?: string | false;
+    /** `{url, steamid, personaname, ...}` — whose profile page this is. */
+    g_rgProfileData?: { steamid?: unknown } | null;
     g_rgWalletInfo?: unknown;
     g_strLanguage?: string;
     g_strCountryCode?: string;
@@ -35,11 +37,27 @@ declare global {
 
 const SOURCE = "steward-page";
 
+/**
+ * Whose backpack this is, from the page rather than from the URL.
+ *
+ * The inventory tab used to work this out with `ownerFromUrl`, which cannot see
+ * past a vanity name and therefore fell back to the logged-in id — so on a
+ * friend's inventory the panel believed the items were ours and offered to
+ * list them. Steam states the owner outright on every profile page; read it.
+ */
+function profileSteamId(win: Window): string | null {
+  const raw = (win.g_rgProfileData as { steamid?: unknown } | null | undefined)?.steamid;
+  if (typeof raw === "string" && /^\d{5,}$/.test(raw)) return raw;
+  if (typeof raw === "number" && Number.isFinite(raw)) return String(raw);
+  return null;
+}
+
 function snapshot(): Record<string, unknown> {
   return {
     source: SOURCE,
     sessionid: window.g_sessionID ?? null,
     steamid: typeof window.g_steamID === "string" ? window.g_steamID : null,
+    profileSteamid: profileSteamId(window),
     wallet: projectWallet(window.g_rgWalletInfo),
     language: window.g_strLanguage ?? "english",
     country: window.g_strCountryCode ?? null,
